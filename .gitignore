@@ -1,0 +1,31 @@
+# R and RStudio
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Assistant / IDE local state
+.posit/
+
+# Source data: never committed
+data-src/
+
+# Large data files - keep local
+data/flight_list/
+data/flight_events/
+data/vfe/
+
+# Rendered outputs
+*.html
+*_files/
+*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+~$*

@@ -1,0 +1,750 @@
+---
+title: "Technical Note 01: Merging Milestone Data for Intercontinental Flights"
+subtitle: "PBWG 2026 Singapore - Global Flight Time Variability and Efficiency"
+author: "Performance Review Unit"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    df-print: paged
+    embed-resources: true
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+
+## Summary
+
+Intercontinental flights are rarely observed from off-block to in-block (AOBT → AIBT) by a single data source. European airport operator data (APDF) covers the European end, partner data covers the other end, and the OSN-based flight event list (OPDI) covers whatever its volunteer receiver network sees. Over the ocean, none of them have data.
+
+This note shows how the three sources are merged into an **analytic milestone dataset**, the first layer of the PBWG analytic chain:
+
+1. **Analytic dataset:** all milestones of all sources, linked to the same physical flight (this note)
+2. **Payload:** metric-specific cleaning and selection, e.g. the last entry into the 40 NM ring for ASMA
+3. **Algorithm:** metric calculation on the payload (taxi times, ASMA/DSMA, VFE, throughput, ...)
+
+The analytic dataset does not de-duplicate, overwrite or rank sources. Every row stays traceable to its source, and repeated observations (e.g. several 40 NM crossings) are kept. Whether APDF, partner data or OSN is more trustworthy for a given milestone is a payload-layer decision.
+
+The method is explained step by step on one aircraft rotation per region pair, covering both directions:
+
+- **Europe–Brazil:** TAM8084 SBGR → EGLL and TAM8085 EGLL → SBGR on 7 June 2025
+- **Europe–China:** CCA937 ZBAA → EGLL and CCA938 EGLL → ZBAA on 3 June 2025
+
+The method is then applied to all flights of both region pairs for 1–14 June 2025.
+
+```{r setup}
+library(tidyverse)
+library(arrow)
+library(gt)
+library(here)
+
+source(here("R", "analytic_merge.R"))
+
+read_region <- function(region) {
+  tag <- sprintf("EUR-%s-%%s-EUR%sOSN-20250601-20250614.csv", region, region)
+  list(
+    flights = read_csv(here("data", sprintf(tag, "flights")), show_col_types = FALSE),
+    ms = read_milestones(here("data", sprintf(tag, "milestone")))
+  )
+}
+bra <- read_region("BRA")
+chn <- read_region("CHN")
+
+core_mst <- c("SOBT", "AOBT", "ATOT", "D40", "D100", "A100", "A40", "ALDT", "AIBT", "SIBT")
+eur_hubs <- c("EDDF", "EDDM", "EGLL", "EHAM", "LEMD", "LFPG", "LIRF", "LSZH")
+```
+
+## 1. Data Sources
+
+| Source | `SOURCE` | Coverage | File |
+|---|---|---|---|
+| European APDF, with NM trajectory ring crossings | `EUR` | European end of the flight | `data/EUR-<XXX>-milestone-test-20250601-20250614.csv` |
+| Brazil partner data (DECEA taxi, punctuality and ASMA data) | `BRA` | Brazilian end of the flight | `data/BRA-EUR-milestone-BRA-20250530-20250615.csv` |
+| China partner data | `CHN` | Chinese end of the flight | `data/CHN-EUR-milestone-CHN-20250529-20250617.csv` |
+| OPDI flight list and flight events (OSN) | `OSN` | Wherever OSN receivers see the aircraft | `data/flight_list/`, `data/flight_events/` |
+
+The APDF and partner files share the PBWG milestone-table format (*PBWG Milestone Tables* technical note): one row per milestone with `FLTID, REG, TYPE, ICAO24, ADEP, ADES, MST, MST_LBL, TIME, LAT, LON, ALT, SOURCE, SOURCE_ID, CONF`. `SOURCE_ID` ends in `-DEP` or `-ARR` and identifies which end of the flight a record describes. In this note, APDF and the partner files are called the *reference sources*.
+
+The merged dataset follows the PBWG conventions:
+
+- **`CONF`** labels out-of-area rows only (e.g. `CHN-ooA` for values a partner reports for the far end of the flight). It is empty for in-area rows. Out-of-area rows are retained for traceability and can be excluded during later filtering.
+- **`MST_LBL`** holds the runway for ATOT/ALDT and the stand for AOBT/AIBT, where available. The airport is not repeated, as it follows from the milestone and ADEP/ADES.
+- **`LAT`/`LON`/`ALT`** are populated for airborne milestones. Positions supplied for ground events are kept as delivered.
+- **`MATCH`** is added by the merge and records how a row was attached to the flight (see section 3). It is kept separate from `CONF`, which describes the source.
+
+### 1.1 OSN milestones
+
+The OSN flight event list has `r n_distinct(c(bra$ms$MST[bra$ms$SOURCE == "OSN"], chn$ms$MST[chn$ms$SOURCE == "OSN"]))` event types for these flights. They are mapped to PBWG milestone codes where a code exists or follows the existing pattern, and kept under their published names otherwise:
+
+| OSN event | `MST` | Note |
+|---|---|---|
+| `xing-<n>nm` outbound at ADEP / inbound at ADES | `D<n>` / `A<n>` | 40, 50, 60, 100, 110, 120 NM; OSN has no 200 NM ring (yet) |
+| `xing-fl<n>` up / down | `FL<nnn>_CLB` / `FL<nnn>_DES` | FL50, 70, 100, 245 |
+| `top-of-climb`, `top-of-descent` | `TOC`, `TOD` | |
+| `level-start`, `level-end` | `LVL_START`, `LVL_END` | All level segments |
+| `level-off-climb-*`, `level-off-descent-*` | `LVL_CLB_START/END`, `LVL_DES_START/END` | Level-offs per the vertical flight efficiency method (CCO/CDO) |
+| `ATOT`, `ALDT`, `AOBT`, `AIBT` | unchanged | |
+| runway, surface and coverage events (`line-up`, `runway-vacated`, `entry-taxiway`, `entry-parking_position`, `first_seen`, ...) | unchanged | No PBWG code yet |
+
+All events are retained. Milestones that no source covers yet (e.g. D200/A200, EXIT/ENTRY) can be added by the respective data provider.
+
+::: callout-important
+## OPDI timestamps are UTC without a time zone attribute
+
+R displays them in the session's local time (e.g. UTC+2 for Europe/Paris in June), which shifts every OSN event by the UTC offset. All OSN timestamps are converted explicitly with `with_tz(x, "UTC")` (`as_utc()` in `R/analytic_merge.R`).
+:::
+
+### 1.2 Brazil partner data
+
+The Brazilian file is extracted from the delivered partner package with `R/prep-partner-BRA.R`. The package documents the conversion of the punctuality times (SOBT/SIBT, some block times) from Brasília time (UTC−3) to UTC. The package's European rows are copies of APDF values already in our extract and are not repeated; per-milestone provenance (taxi, punctuality, ASMA source families) remains available in the package via `SOURCE_ID`.
+
+### 1.3 China partner data
+
+The Chinese sample (`data-src/milestone-China.csv`) follows the official reporting format, with one row per flight: `FLTID, REG, TYPE, ADEP, ADES, SOBT, AOBT, ATOT, ALDT, AIBT, SIBT` (AOBT/AIBT are labelled `NEW_AOBT`/`NEW_AIBT` in the file).
+
+::: callout-note
+## Aircraft identity (ICAO24) added from OSN
+
+ICAO24 is not part of the official reporting format, but it is the key that links the partner records to OSN. It is added from the registration using the OPDI/OSN flight list, with the APDF extracts as a fallback, and only registrations with a unique ICAO24 are used. All 257 registrations were resolved (248 directly from OSN), with no conflicts between the two lookups.
+:::
+
+The file is converted with `R/prep-partner-CHN.R`:
+
+- **Time zone.** Earlier samples contained local times, so the timestamps were checked before use. They are UTC:
+  - At the European end, ATOT and ALDT agree with APDF to the minute (median difference 0).
+  - In the only two cases where OSN also has a runway time at the Chinese end, the two agree within 80 s.
+  - Airborne times are plausible (median 10.5 h eastbound, 11.4 h westbound). A UTC+8 offset would shift them by 8 h.
+  - For flights departing China, the first OSN observation never precedes the Chinese ATOT.
+- **Formats.** Five timestamps are given as dates (e.g. `2025-06-03`). They are read as 00:00 UTC.
+- **Both ends retained.** The file also reports the European end of each flight. These values are consistent with APDF (see above). Following the PBWG convention, they are kept as out-of-area rows (`CONF = CHN-ooA`), alongside the APDF rows.
+
+## 2. The Problem, Shown on One Rotation
+
+### 2.1 Reference sources: each covers one end
+
+On 7 June 2025, the Boeing 777 PT-MUG (ICAO24 `E48BA9`) flew TAM8084 from São Paulo to London and returned as TAM8085. In the reference sources, each flight consists of two separate records. One comes from Brazil and one from APDF, and each covers one end of the flight:
+
+```{r ref-records}
+read_milestones(here("data", "EUR-BRA-milestone-test-20250601-20250614.csv")) |>
+  bind_rows(read_milestones(here("data", "BRA-EUR-milestone-BRA-20250530-20250615.csv"))) |>
+  filter(ICAO24 == "E48BA9", between(TIME, ymd_hms("2025-06-07 02:00:00"), ymd_hms("2025-06-08 09:00:00"))) |>
+  arrange(TIME) |>
+  select(SOURCE_ID, FLTID, ADEP, ADES, MST, MST_LBL, TIME) |>
+  gt(groupname_col = "SOURCE_ID") |>
+  fmt_datetime(TIME, format = "%Y-%m-%d %H:%M:%S") |>
+  sub_missing(missing_text = "")
+```
+
+### 2.2 OSN: the flight comes in pieces
+
+OSN loses an aircraft over the ocean and starts a new flight-list entry when it is seen again. A single intercontinental flight therefore appears as several **segments**. Typically only the first segment has ADEP and only the last has ADES, so filtering the OSN flight list by airport pair finds none of these flights.
+
+```{r osn-segments}
+open_dataset(here("data", "flight_list", "opdi_flight_list")) |>
+  filter(
+    ICAO24 == "e48ba9",
+    FIRST_SEEN >= as.POSIXct("2025-06-07 00:00:00", tz = "UTC"),
+    FIRST_SEEN < as.POSIXct("2025-06-08 12:00:00", tz = "UTC")
+  ) |>
+  select(ID, FLT_ID, ADEP, ADES, FIRST_SEEN, LAST_SEEN, ATOT, ALDT) |>
+  collect() |>
+  as_utc() |>
+  arrange(FIRST_SEEN) |>
+  gt() |>
+  fmt_datetime(c(FIRST_SEEN, LAST_SEEN, ATOT, ALDT), format = "%Y-%m-%d %H:%M:%S") |>
+  sub_missing(missing_text = "")
+```
+
+The six segments belong to two flights: three per crossing. Linking them requires the aircraft identity (ICAO24) and time, not the airport pair.
+
+### 2.3 Scope
+
+The EUR APDF extract defines the **authoritative set of airport pairs**. For both region pairs, it contains the same 8 European hubs (`r paste(eur_hubs, collapse = ", ")`):
+
+| Region pair | Airports outside Europe | Airport pairs in APDF |
+|---|---|---|
+| EUR–BRA | SBBR, SBCF, SBGR, SBKP, SBRF, SBSV | `r n_distinct(paste(bra$flights$ADEP, bra$flights$ADES))` |
+| EUR–CHN | ZBAA, ZGGG, ZGSZ, ZLXY, ZSPD, ZUCK, ZUUU | `r n_distinct(paste(chn$flights$ADEP, chn$flights$ADES))` |
+
+The partner data can cover a wider network (the Brazil package has 16 Brazilian and 45 European airports). Partner flights outside the APDF airport pairs are not included. The scope can be widened once the stakeholders confirm their coverage.
+
+## 3. Linkage Method
+
+The datasets are built by `R/build-analytic.R` using the functions in `R/analytic_merge.R`.
+
+```{mermaid}
+flowchart LR
+  A[APDF records<br/>-DEP / -ARR] --> C[1. Link reference<br/>records into flights<br/>UID]
+  B[Partner records<br/>-DEP / -ARR] --> C
+  C --> D[2. Link OSN<br/>flight-list segments]
+  E[OSN flight list] --> D
+  D --> F[3. Add all events of<br/>linked segments]
+  G[OSN flight events] --> F
+  F --> H[Analytic milestone<br/>dataset]
+```
+
+**Step 1: reference records → flights.** Out-of-area rows are set aside; they follow their in-area record in step 3. A departure-side record (`-DEP`) and an arrival-side record (`-ARR`) belong to the same flight if:
+
+- ICAO24, ADEP and ADES are equal, and
+- the arrival anchor (ALDT, or AIBT if ALDT is missing) falls within the feasible block-time window after the departure anchor (ATOT, or AOBT).
+
+Only mutually unique pairs are linked. Records without a partner remain one-sided flights (`dep_only`, `arr_only`). Flights outside the APDF airport pairs are then dropped (`restrict_to_pairs()`). Each flight receives a `UID` of the form `ADEP-ADES-ICAO24-yyyymmddHHMM`, built from its first anchor time.
+
+**Step 2: OSN segments → flights.** An OSN segment is linked to a flight if:
+
+- its ICAO24 matches,
+- it overlaps the flight's time window (departure anchor − buffer to arrival anchor + buffer; for one-sided flights, the missing anchor is replaced by the maximum block time), and
+- any airport OSN identified for the segment agrees with ADEP/ADES.
+
+For one-sided flights, the window is also closed at the OSN segment that lands at ADES (or opened at the one departing ADEP), so the aircraft's next or previous leg is not picked up. A segment is assigned to only one flight.
+
+**Step 3: merge.** Reference rows (including out-of-area rows of the same partner record) and all events of the linked OSN segments are combined:
+
+- OSN events are mapped to PBWG codes as described in section 1.1.
+- `SOURCE_ID` is the OSN segment id for OSN rows.
+- `MATCH` records how each row was attached: `dep+arr`, `dep_only` or `arr_only` for reference rows, and `icao24+window+fltid` or `icao24+window` for OSN rows. The latter means the OSN callsign differs from the reference callsign, mostly because of empty or garbled ADS-B callsigns (e.g. `DLL506` for `DLH506`).
+
+About 2% of OPDI events have no `event_time` and are excluded, because they cannot be placed in a time sequence.
+
+The parameters depend on the region pair:
+
+```{r bridge-params}
+list(
+  `EUR–BRA` = bridge_params(min_block_h = 5, max_block_h = 16),
+  `EUR–CHN` = bridge_params(min_block_h = 6, max_block_h = 16)
+) |>
+  map(\(p) map_chr(p, \(x) paste(x, collapse = " – "))) |>
+  as_tibble() |>
+  mutate(parameter = names(bridge_params()), .before = 1) |>
+  gt()
+```
+
+## 4. Examples
+
+The examples show the merged sequence for each flight. Level segments, flight-level crossings, the 50/60/110/120 NM rings and surface-movement events are hidden for readability; they remain in the dataset.
+
+```{r show-sequence}
+hide_mst <- "^LVL|^FL\\d|^[AD](50|60|110|120)$|taxiway|parking|apron"
+
+show_sequence <- function(ms, uid) {
+  ms |>
+    filter(UID == uid, !str_detect(MST, hide_mst)) |>
+    select(TIME, MST, MST_LBL, SOURCE, CONF, ALT) |>
+    gt() |>
+    fmt_datetime(TIME, format = "%Y-%m-%d %H:%M:%S") |>
+    tab_style(cell_text(weight = "bold"), cells_body(rows = MST %in% core_mst)) |>
+    sub_missing(missing_text = "")
+}
+
+plot_timeline <- function(ms, uids, partner) {
+  ms |>
+    filter(UID %in% uids, !str_detect(MST, hide_mst)) |>
+    mutate(
+      flight = factor(str_sub(UID, 1, 9), levels = unique(str_sub(uids, 1, 9))),
+      SOURCE = factor(SOURCE, levels = c("OSN", partner, "EUR")),
+      milestone = if_else(MST %in% core_mst, "PBWG milestone", "other OSN event")
+    ) |>
+    ggplot(aes(TIME, SOURCE)) +
+    geom_point(aes(shape = milestone)) +
+    facet_wrap(~flight, ncol = 1, scales = "free_x") +
+    scale_shape_manual(values = c("PBWG milestone" = 16, "other OSN event" = 1)) +
+    labs(x = "Time (UTC)", y = NULL, shape = NULL) +
+    theme(legend.position = "bottom")
+}
+
+ex_bra_eur <- "SBGR-EGLL-E48BA9-202506070318"
+ex_eur_bra <- "EGLL-SBGR-E48BA9-202506072034"
+ex_chn_eur <- chn$flights |> filter(ICAO24 == "780022", ADEP == "ZBAA", ADES == "EGLL", as.Date(T_DEP) == as.Date("2025-06-03")) |> pull(UID)
+ex_eur_chn <- chn$flights |> filter(ICAO24 == "780022", ADEP == "EGLL", ADES == "ZBAA", as.Date(T_DEP) == as.Date("2025-06-03")) |> pull(UID)
+```
+
+### 4.1 BRA → EUR: TAM8084 SBGR → EGLL
+
+```{r example-bra-eur}
+show_sequence(bra$ms, ex_bra_eur)
+```
+
+- **Brazil** supplies the departure end at SBGR: SOBT, AOBT and ATOT on runway 10L.
+- **APDF** supplies the arrival end at EGLL: A100, A40, ALDT, AIBT and SIBT.
+- **OSN** picks the flight up about a minute after take-off at SBGR and loses it over the Atlantic. It then covers the approach to EGLL with all ring and flight-level crossings and ALDT on runway 27R, 26 s before the APDF ALDT.
+- OSN has no take-off or surface events at SBGR, consistent with limited receiver coverage on the ground there.
+
+### 4.2 EUR → BRA: TAM8085 EGLL → SBGR
+
+```{r example-eur-bra}
+show_sequence(bra$ms, ex_eur_bra)
+```
+
+- **APDF** supplies the departure end at EGLL: SOBT, AOBT, ATOT, D40 and D100.
+- **Brazil** supplies the arrival end at SBGR: A100, A40, ALDT, AIBT and SIBT.
+- **OSN** adds the runway times to the second (ATOT EGLL 27R, ALDT SBGR 10R), all ring crossings at EGLL, the 40 NM crossing at SBGR and the vertical profile. It shows three segments with two gaps over the Atlantic.
+- Where two sources report the same milestone, they agree closely: ATOT 20:34:00 (APDF, minute precision) vs 20:35:09 (OSN); D40 within 4 s; A40 within 16 s; ALDT within 53 s.
+
+```{r example-timeline-bra, fig.width=10, fig.height=5}
+plot_timeline(bra$ms, c(ex_bra_eur, ex_eur_bra), "BRA")
+```
+
+### 4.3 CHN → EUR: CCA937 ZBAA → EGLL
+
+On 3 June 2025, the Air China Boeing 777 B-2089 (ICAO24 `780022`) flew CCA937 from Beijing to London and returned as CCA938.
+
+```{r example-chn-eur}
+show_sequence(chn$ms, ex_chn_eur)
+```
+
+- **China** supplies the departure end at ZBAA: SOBT, AOBT and ATOT, as defined in the official reporting format.
+- **APDF** supplies the arrival end at EGLL: A100, A40, ALDT (27L), AIBT and SIBT. The `CHN-ooA` rows show the Chinese view of the same events.
+- **OSN** picks the flight up about 5 minutes after take-off at ZBAA, then sees it only in short pieces over Asia. From the approach to EGLL onwards it is complete: ring and flight-level crossings (A100/A40 within 1 s of APDF) and ALDT, 6 s before the APDF ALDT.
+- The flight left almost 2 h late (SOBT 06:00, AOBT 07:49) and arrived at stand about 1.5 h after SIBT.
+
+### 4.4 EUR → CHN: CCA938 EGLL → ZBAA
+
+```{r example-eur-chn}
+show_sequence(chn$ms, ex_eur_chn)
+```
+
+- **APDF** supplies the departure end at EGLL: SOBT, AOBT, ATOT (27R), D40 and D100.
+- **China** supplies the arrival end at ZBAA: ALDT, AIBT and SIBT.
+- **OSN** covers the departure from EGLL (ATOT 34 s after APDF; D50–D120, D100 within 1 s of APDF; no D40). Over Asia it sees only short pieces, and its last observation is about 5 minutes before the Chinese ALDT. OSN therefore adds no A40/A100 or runway time at ZBAA.
+- The `CHN-ooA` rows show the Chinese view of the European end (SOBT, AOBT, ATOT at EGLL), next to the APDF values.
+
+```{r example-timeline-chn, fig.width=10, fig.height=5}
+plot_timeline(chn$ms, c(ex_chn_eur, ex_eur_chn), "CHN")
+```
+
+Neither reference source alone covers AOBT → AIBT. Merged, all four flights have a full sequence, with OSN filling in the airborne profile where its receivers see the aircraft. The examples also show a structural difference: OSN sees the approach to Brazilian airports at least partly, but has almost no coverage near Chinese airports.
+
+## 5. Data Characterisation
+
+The same summaries are produced for both region pairs, for flights in the APDF scope from 1–14 June 2025.
+
+```{r characterisation-functions}
+direction_of <- function(adep) if_else(adep %in% eur_hubs, "from EUR", "to EUR")
+
+linkage_table <- function(flights) {
+  flights |>
+    mutate(direction = direction_of(ADEP), has_osn = N_OSN_SEGMENTS > 0) |>
+    count(direction, LINK, has_osn) |>
+    pivot_wider(names_from = has_osn, values_from = n, values_fill = 0, names_prefix = "osn_") |>
+    mutate(total = osn_TRUE + osn_FALSE) |>
+    gt(groupname_col = "direction") |>
+    cols_label(LINK = "Reference records", osn_TRUE = "with OSN", osn_FALSE = "without OSN", total = "Total")
+}
+
+# Share of flights with at least one in-area observation per milestone and source
+completeness_table <- function(ms, flights, partner) {
+  shares <- ms |>
+    filter(MST %in% core_mst, !is_ooa(CONF)) |>
+    distinct(UID, MST, SOURCE) |>
+    bind_rows(
+      ms |> filter(MST %in% core_mst, !is_ooa(CONF)) |> distinct(UID, MST) |> mutate(SOURCE = "merged")
+    ) |>
+    left_join(flights |> select(UID, ADEP), by = "UID") |>
+    count(direction = direction_of(ADEP), MST, SOURCE) |>
+    left_join(count(flights, direction = direction_of(ADEP), name = "N"), by = "direction") |>
+    mutate(share = n / N) |>
+    select(direction, MST, SOURCE, share) |>
+    pivot_wider(names_from = SOURCE, values_from = share)
+
+  shares |>
+    arrange(direction, match(MST, core_mst)) |>
+    select(direction, MST, any_of(c("EUR", partner, "OSN")), merged) |>
+    gt(groupname_col = "direction") |>
+    fmt_percent(-c(direction, MST), decimals = 0) |>
+    sub_missing(missing_text = "–") |>
+    cols_label(MST = "Milestone", merged = "Any source")
+}
+
+# Where does OSN see the aircraft near the non-European airport?
+# Ground events carry no airport code: they are attributed to the departure or
+# arrival airport by whether they fall before or after the flight's midpoint.
+osn_airport_coverage <- function(ms, flights) {
+  mid <- ms |>
+    summarise(t_mid = min(TIME) + (max(TIME) - min(TIME)) / 2, .by = UID)
+
+  ms |>
+    filter(SOURCE == "OSN") |>
+    left_join(mid, by = "UID") |>
+    mutate(
+      direction = direction_of(ADEP),
+      at_apt_end = if_else(direction == "to EUR", TIME < t_mid, TIME > t_mid),
+      ground = at_apt_end & (MST %in% c("AOBT", "AIBT") | str_detect(MST, "taxiway|parking|apron")),
+      runway = if_else(direction == "to EUR", MST == "ATOT", MST == "ALDT"),
+      ring40 = if_else(direction == "to EUR", MST == "D40", MST == "A40")
+    ) |>
+    summarise(across(c(ground, runway, ring40), any), .by = UID) |>
+    right_join(
+      flights |> transmute(UID, direction = direction_of(ADEP), apt = if_else(direction == "to EUR", ADEP, ADES)),
+      by = "UID"
+    ) |>
+    mutate(across(c(ground, runway, ring40), \(x) coalesce(x, FALSE))) |>
+    summarise(flights = n(), across(c(ring40, runway, ground), mean), .by = c(apt, direction)) |>
+    arrange(apt, direction) |>
+    gt(groupname_col = "apt") |>
+    fmt_percent(c(ring40, runway, ground), decimals = 0) |>
+    cols_label(direction = "Direction", flights = "Flights", ring40 = "40 NM ring", runway = "Runway time", ground = "Ground events")
+}
+
+# Agreement of runway times between OSN and the reference sources (in-area rows)
+agreement_table <- function(ms) {
+  ms |>
+    filter(MST %in% c("ATOT", "ALDT"), !is_ooa(CONF)) |>
+    summarise(t = min(TIME), .by = c(UID, MST, SOURCE)) |>
+    pivot_wider(names_from = SOURCE, values_from = t) |>
+    pivot_longer(-c(UID, MST, OSN), names_to = "reference", values_to = "t_ref") |>
+    filter(!is.na(OSN), !is.na(t_ref)) |>
+    mutate(d = as.numeric(OSN - t_ref, units = "secs")) |>
+    summarise(
+      n = n(),
+      median_s = median(d),
+      p05_s = quantile(d, 0.05),
+      p95_s = quantile(d, 0.95),
+      .by = c(reference, MST)
+    ) |>
+    gt() |>
+    fmt_number(ends_with("_s"), decimals = 0) |>
+    cols_label(reference = "Reference", MST = "Milestone", median_s = "Median (s)", p05_s = "5th pct (s)", p95_s = "95th pct (s)")
+}
+```
+
+Definitions used in the tables:
+
+- **Completeness** is the share of flights with at least one in-area observation of a milestone per source. Out-of-area rows (`CONF = …-ooA`) are not counted.
+- **OSN coverage** at the non-European airport is the share of flights with an OSN 40 NM crossing, a runway time (ATOT/ALDT) or any ground event (block, taxiway, apron, stand) at that airport.
+- **Agreement** is OSN time minus reference time for ATOT and ALDT. APDF and partner runway times often have minute resolution, so differences within ±60 s are within reporting precision.
+
+### 5.1 Europe–Brazil
+
+#### Linkage
+
+```{r bra-linkage}
+linkage_table(bra$flights)
+```
+
+- `dep+arr` flights have both ends in the reference sources.
+- `dep_only` and `arr_only` flights have only one end. Within the APDF scope, both reference sources should normally be present, so these flights are genuine coverage gaps or unresolved matches. They are subject to review.
+- OSN segments are linked to nearly all flights. For one-sided flights, OSN is often the only source for the other end.
+
+#### Milestone completeness
+
+```{r bra-completeness}
+completeness_table(bra$ms, bra$flights, "BRA")
+```
+
+#### OSN coverage at Brazilian airports
+
+```{r bra-osn-coverage}
+osn_airport_coverage(bra$ms, bra$flights)
+```
+
+#### Agreement with OSN
+
+```{r bra-agreement}
+agreement_table(bra$ms)
+```
+
+### 5.2 Europe–China
+
+#### Linkage
+
+```{r chn-linkage}
+linkage_table(chn$flights)
+```
+
+About 85% of the flights in the APDF scope are linked at both ends. For the remainder, the merged dataset currently holds the European record; these flights can be completed with a future data release.
+
+#### Milestone completeness
+
+```{r chn-completeness}
+completeness_table(chn$ms, chn$flights, "CHN")
+```
+
+#### OSN coverage at Chinese airports
+
+```{r chn-osn-coverage}
+osn_airport_coverage(chn$ms, chn$flights)
+```
+
+#### Agreement with OSN
+
+```{r chn-agreement}
+agreement_table(chn$ms)
+```
+
+### 5.3 Comparison
+
+```{r comparison}
+summarise_region <- function(x, region) {
+  x$flights |>
+    summarise(
+      flights = n(),
+      both_ends = mean(LINK == "dep+arr"),
+      with_osn = mean(N_OSN_SEGMENTS > 0),
+      osn_segments_median = median(N_OSN_SEGMENTS[N_OSN_SEGMENTS > 0])
+    ) |>
+    mutate(
+      region = region,
+      rows_eur = sum(x$ms$SOURCE == "EUR"),
+      rows_partner = sum(!x$ms$SOURCE %in% c("EUR", "OSN")),
+      rows_osn = sum(x$ms$SOURCE == "OSN"),
+      .before = 1
+    )
+}
+
+bind_rows(summarise_region(bra, "EUR–BRA"), summarise_region(chn, "EUR–CHN")) |>
+  gt() |>
+  fmt_percent(c(both_ends, with_osn), decimals = 0) |>
+  fmt_integer(starts_with("rows")) |>
+  cols_label(
+    region = "Region pair", rows_eur = "APDF rows", rows_partner = "Partner rows", rows_osn = "OSN rows",
+    flights = "Flights", both_ends = "Both ends", with_osn = "With OSN", osn_segments_median = "OSN segments (median)"
+  )
+```
+
+## 6. Observations
+
+- **Complementarity.** No source covers AOBT → AIBT on its own, but merged they do for most linked flights in both region pairs.
+- **OSN coverage near partner airports is limited, and partner data are the primary source there.**
+  - Brazil: OSN records the 40 NM crossing for 37% of arrivals at SBGR (86% at SBKP, a small sample), rarely a runway time and no ground events.
+  - China: OSN coverage near Chinese airports is very limited, reflecting the local regulatory context for open surveillance data. The partner data provide the ground and near-airport phases.
+- **Partner contributions complement each other.** The Brazilian package includes ASMA ring crossings (A40/A100) and runway and stand labels. The Chinese data provide the block, runway and schedule times of the official reporting format. Ring crossings at partner airports (D40/D100, and A40/A100 for China) would open the way to ASMA/DSMA analyses at both ends of the flight.
+- **Agreement.** Where OSN and APDF both report runway times, the median difference is under 30 s and 90% of differences are within about ±1 min, consistent with the minute resolution of APDF. The few Brazilian ALDT comparisons show OSN about 1 min earlier.
+- **OSN data quality.** OSN `AOBT`/`AIBT` events can be assigned to the wrong stand visit (e.g. an `AIBT` shortly after take-off). This is left to the payload layer.
+- **Source differences.** APDF airborne milestones partly derive from the NM trajectory (a model). OSN is non-ATC-grade ADS-B with occasional time-synchronisation issues. Neither is a reference truth.
+
+## 7. Worked Example: Vertical Flight Efficiency (Exploratory)
+
+This chapter uses the OSN level segments to explore vertical flight efficiency (VFE) around one major airport per PBWG region. It tests whether the milestone approach supports the VFE study and shows where the open data are dense or sparse. The band breakdown is exploratory and for discussion in the group.
+
+```{r vfe-setup}
+source(here("R", "vfe.R"))
+
+vfe_tag <- "OSN-20250601-20250613"
+vfe_apts <- c(EUR = "EGLL", BRA = "SBGR", USA = "KATL", CAN = "CYYZ", THA = "VTBS", SIN = "WSSS", JPN = "RJAA", CHN = "ZBAA")
+vfe_file <- function(x) here("data", "vfe", sprintf("VFE-%s-%s.csv", x, vfe_tag))
+
+arp <- read_csv(here("data", "ref-airports-ARP.csv"), show_col_types = FALSE)
+vfe_cohort <- read_csv(vfe_file("cohorts"), show_col_types = FALSE)
+vfe_band <- read_csv(vfe_file("bands"), show_col_types = FALSE)
+vfe_roll <- read_csv(vfe_file("rollup"), show_col_types = FALSE)
+vfe_tt <- read_csv(vfe_file("tocod"), show_col_types = FALSE)
+vfe_segs <- map(vfe_apts, \(a) read_csv(vfe_file(paste0(a, "-segments")), show_col_types = FALSE)) |> list_rbind()
+
+apt_levels <- unname(vfe_apts)
+```
+
+### 7.1 Definitions
+
+- **Flights.** All OSN flights departing from (DEP) or arriving at (ARR) the airport, 1–13 June 2025, based on the OSN flight list's ADEP/ADES. The flight event extract ends on 13 June. Flights with ADEP = ADES and OSN records without any airborne event (tow and service vehicles, taxi-only records) are excluded.
+- **Level segment.** An OSN `LVL_START` followed by its `LVL_END` twin within the same OSN flight segment. Unpaired events are counted as a data-quality item.
+- **Level-off.** A level segment of at least 20 s (current VFE convention). Departures use level segments before TOC; arrivals use those after TOD.
+- **Band.** Distance of the level-off start from the airport reference point (ARP, OurAirports), in NM: 200–150, 150–120, 120–100, 100–60, 60–40, 40–20, 20–0. A level-off crossing a band boundary is assigned to the band where it starts.
+- **Level time / distance.** Duration and ground distance between `LVL_START` and `LVL_END`.
+
+### 7.2 Cohorts: what OSN observes
+
+A flight without a level-off may have flown a continuous climb or descent, or OSN may simply not have observed it. Flights are therefore grouped by the closest point to the airport at which OSN observes them. The airport's own runway time counts as 0 NM.
+
+| Cohort | Closest OSN observation | Interpretation |
+|---|---|---|
+| A | within 20 NM | Profile observed down to the airport |
+| B | 20–60 NM | Near-airport phase not observed |
+| C | 60–200 NM | Only the outer part observed |
+| D | none within 200 NM | No usable profile |
+
+```{r vfe-cohorts}
+vfe_cohort |>
+  filter(!str_starts(COHORT, "X")) |>
+  count(APT, DIR, COHORT) |>
+  mutate(share = n / sum(n), flights = sum(n), .by = c(APT, DIR)) |>
+  select(-n) |>
+  pivot_wider(names_from = COHORT, values_from = share, values_fill = 0) |>
+  arrange(match(APT, apt_levels), DIR) |>
+  gt(groupname_col = "APT") |>
+  fmt_percent(starts_with(c("A:", "B:", "C:", "D:")), decimals = 0) |>
+  fmt_integer(flights) |>
+  cols_label(DIR = "Direction", flights = "Flights")
+```
+
+For most airports, OSN observes 90% or more of flights down to 20 NM. The exceptions mark where near-airport data would add most:
+
+- **ZBAA.** OSN identifies only a few dozen arrivals, and none of them within 20 NM. For departures, a quarter of the flights are first seen beyond 20 NM.
+- **WSSS.** About one in five arrivals is last seen 20–60 NM from the airport.
+- **SBGR.** About one in seven departures is first seen 20–60 NM from the airport.
+
+Cohort A is used for the VFE figures below.
+
+### 7.3 Spatial coverage
+
+The maps show the positions of all level-offs within 200 NM (left) and of TOC for departures and TOD for arrivals (right). The rings mark the band limits. Empty sectors can be due to traffic flows, airspace structure or blocked receiver coverage. Separating these effects needs local knowledge.
+
+```{r vfe-maps, fig.width=10, fig.height=5.5}
+#| layout-ncol: 1
+lo_pts <- vfe_segs |> filter(DUR_S >= VFE_MIN_LEVEL_S, !is.na(BAND), !is.na(LAT))
+for (a in apt_levels) {
+  print(
+    vfe_map(filter(lo_pts, APT == a), filter(vfe_tt, APT == a), filter(arp, ICAO == a)) +
+      labs(title = sprintf("%s (%s)", a, names(vfe_apts)[vfe_apts == a]))
+  )
+}
+```
+
+TOC and TOD often lie beyond 120 NM, the outermost OSN ring crossing. The median distance from the ARP is about 90–140 NM at most airports. At ZBAA it is about 60 NM for departures, which is consistent with OSN first observing many of them only en route.
+
+```{r vfe-tocod}
+vfe_tt |>
+  filter(!is.na(DIST)) |>
+  summarise(
+    flights = n(),
+    p25 = quantile(DIST, 0.25), median = median(DIST), p75 = quantile(DIST, 0.75),
+    beyond_200 = mean(DIST > 200),
+    .by = c(APT, DIR)
+  ) |>
+  arrange(match(APT, apt_levels), DIR) |>
+  gt(groupname_col = "APT") |>
+  fmt_number(c(p25, median, p75), decimals = 0) |>
+  fmt_percent(beyond_200, decimals = 0) |>
+  cols_label(DIR = "Direction", flights = "Flights", p25 = "P25 (NM)", median = "Median (NM)", p75 = "P75 (NM)", beyond_200 = "> 200 NM")
+```
+
+### 7.4 Level-offs by band
+
+For each band:
+
+- **Flights observed:** flights whose OSN observations cover the band.
+- **Flights with level-off:** flights with at least one level-off starting in the band, also given as a share of the flights observed.
+- **Level-offs:** number of level-offs starting in the band.
+- **Total and median/IQR:** total level time (min) and its distribution per flight, over flights with a level-off.
+
+```{r vfe-band-table}
+vfe_band_gt <- function(dir) {
+  vfe_band |>
+    filter(DIR == dir) |>
+    mutate(share_lo = FLIGHTS_LO / FLIGHTS_OBS) |>
+    select(APT, BAND, FLIGHTS_OBS, FLIGHTS_LO, share_lo, N_LO, LVL_MIN_SUM, LVL_MIN_P25, LVL_MIN_MED, LVL_MIN_P75) |>
+    arrange(match(APT, apt_levels), desc(BAND)) |>
+    gt(groupname_col = "APT") |>
+    fmt_integer(c(FLIGHTS_OBS, FLIGHTS_LO, N_LO, LVL_MIN_SUM)) |>
+    fmt_percent(share_lo, decimals = 0) |>
+    fmt_number(c(LVL_MIN_P25, LVL_MIN_MED, LVL_MIN_P75), decimals = 1) |>
+    sub_missing(missing_text = "–") |>
+    tab_spanner("Level time per flight (min)", c(LVL_MIN_P25, LVL_MIN_MED, LVL_MIN_P75)) |>
+    cols_label(
+      BAND = "Band (NM)", FLIGHTS_OBS = "Flights observed", FLIGHTS_LO = "Flights with level-off",
+      share_lo = "Share", N_LO = "Level-offs", LVL_MIN_SUM = "Total (min)",
+      LVL_MIN_P25 = "P25", LVL_MIN_MED = "Median", LVL_MIN_P75 = "P75"
+    )
+}
+```
+
+#### Arrivals (descent)
+
+```{r vfe-band-arr}
+vfe_band_gt("ARR")
+```
+
+#### Departures (climb)
+
+```{r vfe-band-dep}
+vfe_band_gt("DEP")
+```
+
+```{r vfe-band-plot, fig.width=10, fig.height=5}
+vfe_band |>
+  mutate(
+    share_lo = FLIGHTS_LO / FLIGHTS_OBS,
+    APT = factor(APT, levels = apt_levels)
+  ) |>
+  ggplot(aes(share_lo, BAND)) +
+  geom_col() +
+  facet_grid(DIR ~ APT) +
+  scale_x_continuous(labels = scales::label_percent(), breaks = c(0, 0.25, 0.5)) +
+  labs(x = "Share of observed flights with a level-off starting in the band", y = "Band (NM)")
+```
+
+### 7.5 Roll-up per airport
+
+VFE indicators per airport and direction, for flights in cohort A within 200 NM:
+
+- **Without level-off:** share of flights with no level-off of 20 s or more, i.e. a continuous climb or descent under this definition.
+- **Level time / distance per flight:** average over all flights, including those without a level-off.
+- **Median level time:** median over flights with at least one level-off.
+
+```{r vfe-rollup}
+vfe_roll |>
+  filter(str_starts(COHORT, "A")) |>
+  select(APT, DIR, FLIGHTS, SHARE_NO_LO, LVL_MIN_MEAN, LVL_NM_MEAN, LVL_MIN_MED_LO) |>
+  arrange(DIR, match(APT, apt_levels)) |>
+  gt(groupname_col = "DIR") |>
+  fmt_integer(FLIGHTS) |>
+  fmt_percent(SHARE_NO_LO, decimals = 0) |>
+  fmt_number(c(LVL_MIN_MEAN, LVL_NM_MEAN, LVL_MIN_MED_LO), decimals = 1) |>
+  cols_label(
+    APT = "Airport", FLIGHTS = "Flights", SHARE_NO_LO = "Without level-off",
+    LVL_MIN_MEAN = "Level time per flight (min)", LVL_NM_MEAN = "Level distance per flight (NM)",
+    LVL_MIN_MED_LO = "Median level time, flights with level-off (min)"
+  )
+```
+
+### 7.6 Observations
+
+- **Arrivals level off more than departures** at every airport, in line with earlier VFE work. Level time per arrival is highest at KATL, RJAA and EGLL, at about 4–6 min per flight. Departures typically level off for less than 1.5 min per flight.
+- **Where level-offs occur.** For arrivals, most level time is within 40 NM of the airport: about 57–78% at the airports with good near-airport coverage (EGLL 78%, SBGR 78%, VTBS 76%, CYYZ 57%). The outer bands (120–200 NM) carry a larger share at CYYZ (29%) and KATL (19%). At WSSS the 40–60 NM band stands out (21%). For the few ZBAA arrivals, almost no level time falls within 20 NM, consistent with their observation ending before that point.
+- **Coverage shapes the results.** VFE figures for ZBAA, and to a lesser extent for WSSS arrivals and SBGR departures, rest on a smaller or incomplete near-airport observation. Partner data on the inner bands (e.g. 40 NM crossings and level segments) would make these figures comparable with the other airports.
+- **Data-engineering items.** Several OSN data preparation items were identified and are listed in `data/vfe/OSN-data-engineering-items-OSN-20250601-20250613.csv` for discussion with the OPDI data engineer:
+  - level-off events (KPI17/19) with a positive duration but `distance_nm = 0`;
+  - no 200 NM ring crossings;
+  - level-off events without position;
+  - the flight-event extract ending on 13 June, while the flight list ends on 14 June.
+
+  Level time is not affected by these items. Level distance is taken from the `LVL_START`/`LVL_END` positions rather than the KPI events.
+
+```{r vfe-issues}
+read_csv(vfe_file("issues"), show_col_types = FALSE) |>
+  filter(!is.na(N)) |>
+  mutate(share = N / DENOMINATOR) |>
+  select(APT, ISSUE, share) |>
+  pivot_wider(names_from = APT, values_from = share) |>
+  select(ISSUE, all_of(apt_levels)) |>
+  gt() |>
+  fmt_percent(-ISSUE, decimals = 1) |>
+  cols_label(ISSUE = "Item (share of events or flights)")
+```
+
+## 8. Next Steps
+
+- [ ] Review one-sided flights and the OSN links with `MATCH = icao24+window`
+- [ ] Add D200/A200 crossings to the OPDI flight events (OSN data engineering)
+- [ ] Discuss with the partners whether ring crossings (40/100 NM) can be included in future releases
+- [ ] Agree PBWG codes for the remaining OSN events (50/60/110/120 NM rings, runway and surface events)
+- [ ] Apply to the Singapore partner data
+- [ ] Define payload rules per metric (taxi-out/in, ASMA/DSMA, VFE)
+- [ ] VFE: discuss band breakdown and cohort definition in the group; add supplementary measures (e.g. level segment duration distribution, level altitudes)
+- [ ] VFE: follow up the OSN data-engineering items with the OPDI data engineer
+
+## Appendix: Files
+
+| File | Content |
+|---|---|
+| `R/prep-partner-BRA.R` | Extracts the Brazilian payload from the partner package |
+| `R/prep-partner-CHN.R` | Converts the Chinese sample to the PBWG format, adds ICAO24 |
+| `R/analytic_merge.R` | Linkage and merge functions |
+| `R/build-analytic.R` | Builds the analytic datasets for all region pairs |
+| `R/vfe.R`, `R/build-vfe.R` | VFE functions and build script |
+| `data/ref-airports-ARP.csv` | Airport reference points (OurAirports) |
+| `data/EUR-<XXX>-milestone-EUR<XXX>OSN-20250601-20250614.csv` | Analytic milestone dataset (PBWG milestone-table format plus `UID` and `MATCH`) |
+| `data/EUR-<XXX>-flights-EUR<XXX>OSN-20250601-20250614.csv` | One row per flight: reference record ids, anchors, link type, number of OSN segments |
+| `data/vfe/` | VFE level segments, cohorts, band tables, roll-up, TOC/TOD and data-engineering items |
+
+---
+
+**Document History**
+
+- 2026-10-27: Initial version: problem definition, case study, algorithm design
+- 2026-10-28: Restructured around the analytic merge of APDF, partner and OSN data; examples TAM8084/TAM8085
+- 2026-10-28: China partner sample added; examples CCA937/CCA938; data characterisation for both region pairs
+- 2026-10-28: Exploratory VFE worked example for eight PBWG reference airports
