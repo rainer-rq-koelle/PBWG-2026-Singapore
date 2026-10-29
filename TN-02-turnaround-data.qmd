@@ -3,6 +3,7 @@ title: "Technical Note 02: Turnaround and Delay Propagation"
 subtitle: "PBWG 2026 Singapore – European study dataset, June–August 2025"
 author: "Performance Review Unit"
 date: today
+bibliography: references.bib
 format:
   html:
     toc: true
@@ -271,22 +272,37 @@ tm_all |>
 
 All delays are signed (negative = early) and in minutes. Local metrics use the hub data only and cover all turnarounds, international included. Chain metrics need both remote ends and apply to EUR–EUR turns.
 
+**Established indicators.** Where an indicator already exists, its established name is used. Block time overshoot (BTO) and the delay difference indicator for a flight (DDI-F) were introduced by EUROCONTROL's Central Office for Delay Analysis (CODA) for schedule robustness [@dewandeler2011]; the ground-time overshoot (GTO), the delay difference indicator for the ground phase (DDI-G) and the turnaround delay indicator (TDI) are published on the EUROCONTROL Aviation Intelligence Portal[^aiu]. The definitions are expressed in the PBWG milestones[^coda-ms]. A positive DDI means delay is added on the link.
+
+[^aiu]: https://ansperformance.eu/acronym/gto/, /ddi-g/, /tdi/.
+[^coda-ms]: CODA uses ATD/ATA for actual off-/in-block and STD/STA for scheduled off-/in-block times, i.e. AOBT/AIBT and SOBT/SIBT.
+
+| Indicator | Definition | Link |
+|---|---|---|
+| BTO | Share of flights with actual block time AIBT − AOBT > scheduled block time SIBT − SOBT | Upstream / downstream leg |
+| DDI-F | Arrival delay − departure delay of a flight: (AIBT − SIBT) − (AOBT − SOBT) | Upstream ($D_1 - D_0$) / downstream ($D_3 - D_2$) leg |
+| GTO | Share of turnarounds with ATT > STT | Hub turn |
+| DDI-G | ATT − STT (= $D_2 - D_1$) | Hub turn |
+| TDI | $D_2 - \max(0, D_1)$: DDI-G with early arrivals neutralised | Hub turn |
+
+**Further metrics** used in this note:
+
 | Metric | Definition |
 |---|---|
 | STT, ATT | Scheduled / actual ground time: SOBT − SIBT, AOBT − AIBT |
 | Arrival / departure delay $D_1, D_2$ | AIBT − SIBT, AOBT − SOBT at the hub |
+| Upstream / downstream delay $D_0, D_3$ | AOBT − SOBT at the origin; AIBT − SIBT at the destination |
 | On-time share | Share with delay ≤ 15 min |
 | Minimum turn time (MTT) | 5th percentile of ATT per class and aircraft type (empirical) |
 | Slack | STT − MTT |
-| Absorbed at hub | $D_1 - D_2$; share of positive arrival delay minutes not carried into the departure |
 | Late arr. → late dep. | Share of arrivals > 15 min late that also depart > 15 min late |
 | Late dep. after late arr. | Share of departures > 15 min late preceded by an arrival > 15 min late |
-| Upstream / downstream delay $D_0, D_3$ | AOBT − SOBT at the origin; AIBT − SIBT at the destination |
-| Recovered on a link | Delay in − delay out ($D_0 - D_1$, $D_1 - D_2$, $D_2 - D_3$, $D_0 - D_3$) |
 | Late carry | Share of flights > 15 min late at the start of a link still > 15 min late at its end |
 | Delay ratio | Positive delay minutes at the end of a link per positive delay minute at its start (> 1: link adds delay) |
 
-The metric set follows common practice in turnaround and delay-propagation analysis (minimum ground times, schedule slack, reactionary delay); it is a pragmatic selection, not a literature review. Delay codes (APDF) and ATFM delay (NM) are carried in the flight-attributes table but not used.
+**Daily view.** Indicators are also computed per local operating day, which runs from 04:00 to 04:00 local time at the hub. A turnaround is assigned to the operating day of its SIBT, so a delayed flight stays with the day it was scheduled for. The daily view is descriptive. It shows how individual days and weekdays relate to the period values; no thresholds are applied.
+
+**ATFM delay.** Delay causes are reported differently across regions; the IATA delay codes of the APDF are specific to Europe and are not used. ATFM delay is an internationally established concept and is available from NM for every flight linked by SAM_ID (0 if the flight was not regulated). Turnarounds are split by whether the inbound flight, the outbound flight, both or neither carried ATFM delay.
 
 ## 4. Airport Analyses
 
@@ -340,6 +356,29 @@ tbl_local(tm_all |> filter(TA_CLASS == "INTL-INTL"), by = "HUB")
 
 ### 5.3 Propagation along the chain
 
+```{r cmp-indicators}
+#| tbl-cap: "Established indicators per link, EUR–EUR turns (legs: remote end APDF). BTO/GTO in %, DDI-F/DDI-G/TDI mean in min (> 0: delay added)"
+map(hd_all, \(h) chain_links(h$ch)) |> list_rbind() |>
+  filter(SRC %in% c("APDF", "hub"), LINK != "chain (D0->D3)") |>
+  mutate(LINK = recode(LINK, "1 upstream leg (D0->D1)" = "UP", "2 hub turn (D1->D2)" = "HUB",
+                       "3 downstream leg (D2->D3)" = "DN")) |>
+  select(HUB, LINK, OVERSHOOT, DDI_MEAN) |>
+  pivot_wider(names_from = LINK, values_from = c(OVERSHOOT, DDI_MEAN)) |>
+  left_join(tm_all |> filter(TURN_TYPE == "turn", TA_CLASS == "EUR-EUR") |>
+              group_by(HUB) |> summarise(TDI = mean(TDI)), by = "HUB") |>
+  select(HUB, OVERSHOOT_UP, DDI_MEAN_UP, OVERSHOOT_HUB, DDI_MEAN_HUB, TDI, OVERSHOOT_DN, DDI_MEAN_DN) |>
+  gt_doc() |>
+  tab_spanner("Upstream leg", c(OVERSHOOT_UP, DDI_MEAN_UP)) |>
+  tab_spanner("Hub turn", c(OVERSHOOT_HUB, DDI_MEAN_HUB, TDI)) |>
+  tab_spanner("Downstream leg", c(OVERSHOOT_DN, DDI_MEAN_DN)) |>
+  cols_label(OVERSHOOT_UP = "BTO", DDI_MEAN_UP = "DDI-F", OVERSHOOT_HUB = "GTO", DDI_MEAN_HUB = "DDI-G",
+             OVERSHOOT_DN = "BTO", DDI_MEAN_DN = "DDI-F") |>
+  fmt_percent(starts_with("OVERSHOOT"), decimals = 0) |>
+  fmt_number(c(starts_with("DDI_MEAN"), TDI), decimals = 1)
+```
+
+For reference, CODA reported a BTO of about 30% for all European flights in 2003–2008 and recommends 30–35% as a planning target. For 2008 it found the arrival delay on average 3 minutes below the departure delay, i.e. a DDI-F of −3 minutes under the formula above [@dewandeler2011].
+
 ```{r cmp-chain}
 #| tbl-cap: "Delay ratio and late carry per link, EUR–EUR turns (remote end APDF; chain: both ends APDF)"
 map(hd_all, \(h) chain_links(h$ch)) |> list_rbind() |>
@@ -368,13 +407,43 @@ link_curves(ch_all) |>
   labs(x = "Arrival delay D1 (min, 5-min bins)", y = "Mean departure delay D2 (min)")
 ```
 
-### 5.4 Observations
+### 5.4 ATFM delay
+
+```{r cmp-atfm}
+#| tbl-cap: "Turns by ATFM delay of the inbound and outbound flight (NM-linked turns, all classes)"
+ta_atfm_split(ch_all) |>
+  select(HUB, ATFM, SHARE, DEP_DLY, DEP_OTP15, TDI) |>
+  pivot_wider(names_from = ATFM, values_from = c(SHARE, DEP_DLY, DEP_OTP15, TDI)) |>
+  select(HUB, starts_with("SHARE"), starts_with("DEP_DLY"), starts_with("TDI")) |>
+  gt_doc() |>
+  tab_spanner("Share of turns", starts_with("SHARE")) |>
+  tab_spanner("Mean dep. delay (min)", starts_with("DEP_DLY")) |>
+  tab_spanner("Mean TDI (min)", starts_with("TDI")) |>
+  cols_label(ends_with("_none") ~ "none", ends_with("_inbound only") ~ "in", ends_with("_outbound only") ~ "out",
+             ends_with("_inbound and outbound") ~ "both") |>
+  fmt_percent(starts_with("SHARE"), decimals = 0) |>
+  fmt_number(c(starts_with("DEP_DLY"), starts_with("TDI")), decimals = 1)
+```
+
+ATFM delay is assigned to the flight that is regulated; it is part of that flight's departure delay. The split shows how much of the departure delay and of the delay added during the turn (TDI) coincides with ATFM regulations on the inbound or outbound flight. It is a descriptive breakdown, not an attribution of cause.
+
+### 5.5 Daily view and weekday pattern
+
+```{r cmp-weekday}
+#| fig-cap: "Weekday pattern: median over the operating days of each weekday, one line per hub"
+#| fig-height: 4.5
+plot_weekday(map(hd_all, "daily") |> list_rbind())
+```
+
+### 5.6 Observations
 
 These results describe one summer and should be read with the coverage of chapter 2 in mind:
 
-- **Flight legs carry delay largely unchanged.** The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
-- **The hub turn is where delay changes most** (delay ratio `r rr("2 hub turn (D1->D2)")`). Early or on-time arrivals still depart with a positive median delay, i.e. delay originating at the hub, while slack in the turn absorbs part of large inbound delays.
+- **Flight legs reduce delay.** Mean DDI-F is negative on both legs at every hub, and BTO is mostly around 15–30%, at or below CODA's 30–35% planning range. The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
+- **The hub turn adds delay.** GTO is about 70–80%: most turns take longer than scheduled, and mean DDI-G is positive at every hub (delay ratio `r rr("2 hub turn (D1->D2)")`). TDI, which neutralises early arrivals, is lower but positive at most hubs. Early or on-time arrivals still depart with a positive median delay, while slack in the turn absorbs part of large inbound delays.
+- **ATFM delay accounts for part of the departure delay but not all of it.** Turns whose outbound flight carried ATFM delay depart markedly later, while turns without any ATFM delay still show positive mean departure delay and TDI at most hubs.
 - **Over the full chain** the hubs differ (`r rr("chain (D0->D3)")`): at some hubs the leg buffers outweigh the delay added at the hub, at others the hub adds more than the legs recover. Whether these differences are systematic needs more than one season.
+- **Daily view.** Per-hub timelines (chapter 4) show that period values hide considerable day-to-day variation; a few days with high departure delay and ATFM delay stand out at several hubs. Their operational interpretation is left for discussion.
 - **Proxied (NM) remote ends** give results close to those with APDF remote ends, which supports their use for aggregate statistics.
 
 ## Appendix A: Data Dictionary
@@ -504,6 +573,8 @@ The study uses the prefixes `E` and `L` as a whole; the few non-member locations
 ## Appendix D: Open Points
 
 - Thresholds (§3.4) and the empirical MTT definition for PBWG discussion.
-- Separation of hub-generated and reactionary departure delay (delay codes, attributes kept).
+- Daily view: operational interpretation of individual days and weekday patterns; whether thresholds for "atypical" days are useful.
+- Delay causes beyond ATFM (APDF delay codes are European-specific and kept as attributes only).
+- Published definitions of DDI-G, GTO and TDI beyond the Aviation Intelligence Portal (original CODA/PRU source).
 - Expansion to further hubs and to summer 2026 (NM Q3 2026 final).
 - International legs can be completed with partner data (remote SOBT/AOBT/ATOT, ALDT/AIBT/SIBT) in the milestone format of Appendix A.1.

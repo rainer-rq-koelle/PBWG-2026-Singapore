@@ -73,3 +73,18 @@ tbl_links(cl, c("3 downstream leg (D2->D3)", "chain (D0->D3)"))
 #| fig-height: 3.5
 plot_links(hd$ch)
 ```
+
+#### ATFM delay
+
+```{r}
+#| tbl-cap: !expr cap("turns by ATFM delay of the inbound and outbound flight (NM-linked turns)")
+tbl_atfm(hd$ch)
+```
+
+#### Daily view
+
+```{r}
+#| fig-cap: !expr cap("indicators per local operating day (turns; DDI-F on EUR–EUR turns with remote end); dashed line = median over days")
+#| fig-height: 7.5
+plot_daily(hd$daily)
+```

@@ -72,11 +72,13 @@ ta_classify <- function(tr, th = ta_thresholds) {
     )
 }
 
-# Turnaround metrics (local, at the hub)
+# Turnaround metrics (local, at the hub). All delays signed (negative = early).
 #   ARR_DLY  = AIBT - SIBT            arrival (in-block) delay
 #   DEP_DLY  = AOBT - SOBT            departure (off-block) delay
-#   TT_DEV   = ATT - STT              turnaround time deviation
-#   ABSORBED = ARR_DLY - DEP_DLY      delay absorbed (>0) or added (<0) on the ground
+#   DDI_G    = ATT - STT              Delay Difference Indicator - Group (AIU/CODA naming)
+#   GTO_FLAG = ATT > STT              Ground Time Overshoot (share over a set of turns = GTO)
+#   TDI      = DEP_DLY - max(0, ARR_DLY)  Turnaround Delay Indicator (early arrivals neutralised)
+#   ABSORBED = ARR_DLY - DEP_DLY      delay absorbed (>0) or added (<0) on the ground (= -DDI_G)
 #   MTT      = empirical minimum turn time (class x type quantile of ATT, turns only)
 #   SLACK    = STT - MTT              scheduled buffer
 #   PROP_EXP = max(0, ARR_DLY - SLACK)  delay expected to propagate given the buffer
@@ -92,15 +94,24 @@ ta_metrics <- function(tr, th = ta_thresholds) {
     mutate(
       ARR_DLY  = as.numeric(difftime(AIBT, SIBT, units = "mins")),
       DEP_DLY  = as.numeric(difftime(AOBT, SOBT, units = "mins")),
-      TT_DEV   = ATT - STT,
+      DDI_G    = ATT - STT,
+      GTO_FLAG = ATT > STT,
+      TDI      = DEP_DLY - pmax(0, ARR_DLY),
       ABSORBED = ARR_DLY - DEP_DLY,
       SLACK    = STT - MTT,
       PROP_EXP = pmax(0, ARR_DLY - SLACK),
       PROP_OBS = pmin(pmax(ARR_DLY, 0), pmax(DEP_DLY, 0)),
       ARR_LATE15 = ARR_DLY > 15,
-      DEP_LATE15 = DEP_DLY > 15
+      DEP_LATE15 = DEP_DLY > 15,
+      # Operating day (local, from OPDAY_START_H) of the scheduled arrival
+      OPDAY = op_day(SIBT, HUB)
     )
 }
+
+# Local operating day: calendar date of (t - OPDAY_START_H) in the hub's time zone.
+# Reference is the scheduled time (SIBT/SOBT), so delay does not move a flight to another day.
+OPDAY_START_H <- 4
+op_day <- function(t, hub, start_h = OPDAY_START_H) local_date(t - start_h * 3600, hub)
 
 # Scheduled vs planned vs actual block time on legs with APDF at both ends and an NM link.
 # Uses the build object (ta_build() return) for NM fields.
@@ -128,13 +139,13 @@ ta_timeline <- function(legs, nm_fields) {
 #   D1 = AIBT_hub - SIBT_hub    hub arrival delay           (= ARR_DLY)
 #   D2 = AOBT_hub - SOBT_hub    hub departure delay         (= DEP_DLY)
 #   D3 = AIBT_dn - SIBT_dn      downstream arrival delay    (remote)
-#   REC_UP = D0 - D1  recovered on the inbound leg (block buffer)
-#   REC_HUB = D1 - D2 absorbed at the hub (= ABSORBED)
-#   REC_DN = D2 - D3  recovered on the outbound leg
-ta_chain <- function(tm, legs) {
+#   DDI_F_UP = D1 - D0, DDI_F_DN = D3 - D2  Delay Difference Indicator - Flight per leg (> 0: delay added)
+#   BTO_UP / BTO_DN = actual block time > scheduled block time (share over flights = BTO)
+#   ATFM_ARR / ATFM_DEP = NM ATFM delay of the inbound / outbound flight (0 if not regulated)
+ta_chain <- function(tm, legs, attr = NULL) {
   up <- legs |> select(ARR_UID = UID, UP_SRC = REMOTE_SRC, UP_SOBT = SOBT, UP_AOBT = AOBT)
   dn <- legs |> select(DEP_UID = UID, DN_SRC = REMOTE_SRC, DN_AIBT = AIBT, DN_SIBT = SIBT)
-  tm |>
+  ch <- tm |>
     left_join(up, by = "ARR_UID") |>
     left_join(dn, by = "DEP_UID") |>
     mutate(
@@ -142,56 +153,141 @@ ta_chain <- function(tm, legs) {
       D1 = ARR_DLY,
       D2 = DEP_DLY,
       D3 = as.numeric(difftime(DN_AIBT, DN_SIBT, units = "mins")),
-      REC_UP  = D0 - D1,
-      REC_HUB = D1 - D2,
-      REC_DN  = D2 - D3,
+      DDI_F_UP = D1 - D0,
+      DDI_F_DN = D3 - D2,
+      BTO_UP = as.numeric(difftime(AIBT, UP_AOBT, units = "mins")) >
+               as.numeric(difftime(SIBT, UP_SOBT, units = "mins")),
+      BTO_DN = as.numeric(difftime(DN_AIBT, AOBT, units = "mins")) >
+               as.numeric(difftime(DN_SIBT, SOBT, units = "mins")),
       CHAIN_SRC = case_when(
         UP_SRC == "APDF" & DN_SRC == "APDF"                         ~ "APDF",
         UP_SRC %in% c("APDF", "NM") & DN_SRC %in% c("APDF", "NM")   ~ "with-NM",
         TRUE                                                        ~ "incomplete"
       )
     )
+  if (!is.null(attr)) {
+    # NM: ATFM_DELAY is empty for non-regulated flights -> 0 when the flight is linked to NM
+    atfm <- attr |>
+      transmute(UID, ATFM = if_else(is.na(FLT_STATUS), NA_real_, coalesce(as.numeric(ATFM_DELAY), 0)))
+    ch <- ch |>
+      left_join(atfm |> rename(ARR_UID = UID, ATFM_ARR = ATFM), by = "ARR_UID") |>
+      left_join(atfm |> rename(DEP_UID = UID, ATFM_DEP = ATFM), by = "DEP_UID")
+  }
+  ch
 }
 
 # Summary of one link of the chain: delay in (x) -> delay out (y)
-link_summary <- function(x, y, late = 15) {
+#   DDI_F / DDI_G = mean(y - x) (CODA/AIU convention, > 0: delay added); BTO/GTO = share(overshoot)
+link_summary <- function(x, y, over = NULL, late = 15) {
   ok <- !is.na(x) & !is.na(y)
+  if (!is.null(over)) over <- over[ok]
   x <- x[ok]; y <- y[ok]
   if (length(x) == 0) return(tibble())
   tibble(
     N          = length(x),
     IN_MED     = median(x),
     OUT_MED    = median(y),
-    REC_MED    = median(x - y),
+    DDI_MEAN   = mean(y - x),
+    DDI_MED    = median(y - x),
+    OVERSHOOT  = if (is.null(over)) NA_real_ else mean(over, na.rm = TRUE),
     # Of the flights late (> 15) at the start: share still late at the end
     LATE_CARRY = sum(x > late & y > late) / sum(x > late),
     # Positive delay minutes at the end per positive delay minute at the start
-    DLY_RATIO  = sum(pmax(y, 0)) / sum(pmax(x, 0)),
-    # Slope of y on x for late starts (marginal propagation per minute of delay)
-    SLOPE_LATE = if (sum(x > late) >= 30) unname(coef(lm(y[x > late] ~ x[x > late]))[2]) else NA_real_
+    DLY_RATIO  = sum(pmax(y, 0)) / sum(pmax(x, 0))
   )
 }
 
 ta_chain_summary <- function(ch, by = c("HUB", "TA_CLASS")) {
   ch <- ch |> filter(TURN_TYPE == "turn")
   links <- list(
-    "1 upstream leg (D0->D1)"  = c("D0", "D1"),
-    "2 hub turn (D1->D2)"      = c("D1", "D2"),
-    "3 downstream leg (D2->D3)" = c("D2", "D3"),
-    "chain (D0->D3)"           = c("D0", "D3")
+    "1 upstream leg (D0->D1)"   = c("D0", "D1", "BTO_UP"),
+    "2 hub turn (D1->D2)"       = c("D1", "D2", "GTO_FLAG"),
+    "3 downstream leg (D2->D3)" = c("D2", "D3", "BTO_DN"),
+    "chain (D0->D3)"            = c("D0", "D3", NA)
   )
   imap(links, \(v, nm) {
     src_col <- switch(substr(nm, 1, 1), "1" = "UP_SRC", "2" = NULL, "3" = "DN_SRC", "c" = "CHAIN_SRC")
     g <- c(by, src_col)
     ch |>
       group_by(across(all_of(g))) |>
-      reframe(link_summary(.data[[v[1]]], .data[[v[2]]])) |>
+      reframe(link_summary(.data[[v[1]]], .data[[v[2]]], if (is.na(v[3])) NULL else .data[[v[3]]])) |>
       rename(any_of(c(SRC = "UP_SRC", SRC = "DN_SRC", SRC = "CHAIN_SRC"))) |>
       mutate(LINK = nm, .before = 1)
   }) |>
     list_rbind() |>
     mutate(SRC = coalesce(SRC, "hub")) |>
     filter(SRC %in% c("hub", "APDF", "NM", "with-NM"))
+}
+
+# Daily view per local operating day (turns only; chain indicators on EUR-EUR turns).
+# Descriptive: puts the period summaries into perspective, no thresholds applied.
+ta_daily <- function(ch, by = c("HUB", "OPDAY")) {
+  t <- ch |> filter(TURN_TYPE == "turn")
+  eur <- t |> filter(TA_CLASS == "EUR-EUR")
+  local <- t |>
+    group_by(across(all_of(by))) |>
+    summarise(
+      N_TURNS   = n(),
+      ARR_OTP15 = mean(!ARR_LATE15),
+      DEP_OTP15 = mean(!DEP_LATE15),
+      ARR_DLY   = mean(ARR_DLY),
+      DEP_DLY   = mean(DEP_DLY),
+      DDI_G     = mean(DDI_G),
+      GTO       = mean(GTO_FLAG),
+      TDI       = mean(TDI),
+      .groups = "drop"
+    )
+  chain <- eur |>
+    group_by(across(all_of(by))) |>
+    summarise(
+      N_EUR     = n(),
+      BTO_UP    = mean(BTO_UP, na.rm = TRUE),
+      DDI_F_UP  = mean(DDI_F_UP, na.rm = TRUE),
+      BTO_DN    = mean(BTO_DN, na.rm = TRUE),
+      DDI_F_DN  = mean(DDI_F_DN, na.rm = TRUE),
+      .groups = "drop"
+    )
+  out <- left_join(local, chain, by = by)
+  if ("ATFM_DEP" %in% names(t)) {
+    atfm <- t |>
+      group_by(across(all_of(by))) |>
+      summarise(
+        ATFM_DEP_SHARE = mean(ATFM_DEP > 0, na.rm = TRUE),
+        ATFM_DEP_MEAN  = mean(ATFM_DEP, na.rm = TRUE),
+        ATFM_ARR_MEAN  = mean(ATFM_ARR, na.rm = TRUE),
+        .groups = "drop"
+      )
+    out <- left_join(out, atfm, by = by)
+  }
+  out |> mutate(WDAY = lubridate::wday(OPDAY, label = TRUE, week_start = 1, locale = "C"), .after = OPDAY)
+}
+
+# ATFM breakdown: local and chain indicators split by whether the departing flight
+# (or the inbound flight) carried ATFM delay. ATFM delay is an internationally used concept.
+ta_atfm_split <- function(ch, by = "HUB") {
+  ch |>
+    filter(TURN_TYPE == "turn", !is.na(ATFM_ARR), !is.na(ATFM_DEP)) |>
+    mutate(ATFM = case_when(
+      ATFM_ARR > 0 & ATFM_DEP > 0 ~ "inbound and outbound",
+      ATFM_ARR > 0                ~ "inbound only",
+      ATFM_DEP > 0                ~ "outbound only",
+      TRUE                        ~ "none"
+    ) |> factor(levels = c("none", "inbound only", "outbound only", "inbound and outbound"))) |>
+    group_by(across(all_of(c(by, "ATFM")))) |>
+    summarise(
+      N         = n(),
+      ATFM_ARR  = mean(ATFM_ARR),
+      ATFM_DEP  = mean(ATFM_DEP),
+      ARR_DLY   = mean(ARR_DLY),
+      DEP_DLY   = mean(DEP_DLY),
+      DEP_OTP15 = mean(!DEP_LATE15),
+      DDI_G     = mean(DDI_G),
+      TDI       = mean(TDI),
+      DDI_F_DN  = mean(DDI_F_DN[TA_CLASS == "EUR-EUR"], na.rm = TRUE),
+      .groups = "drop_last"
+    ) |>
+    mutate(SHARE = N / sum(N), .after = N) |>
+    ungroup()
 }
 
 # Summary per class: on-time shares, absorption and propagation
@@ -208,6 +304,9 @@ ta_summary <- function(tm, by = "TA_CLASS") {
       DEP_DLY_MED  = median(DEP_DLY),
       ARR_OTP15    = mean(!ARR_LATE15),
       DEP_OTP15    = mean(!DEP_LATE15),
+      DDI_G        = mean(DDI_G),
+      GTO          = mean(GTO_FLAG),
+      TDI          = mean(TDI),
       # Of the arrivals > 15 min late: share that also departed > 15 min late
       LATE_CARRY   = sum(ARR_LATE15 & DEP_LATE15) / sum(ARR_LATE15),
       # Of the departures > 15 min late: share preceded by a > 15 min late arrival
