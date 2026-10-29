@@ -15,6 +15,10 @@ data-src/
 data/flight_list/
 data/flight_events/
 data/vfe/
+data/turnaround/
+
+# knitr scratch output
+figure/
 
 # Rendered outputs
 *.html

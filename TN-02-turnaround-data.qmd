@@ -1,0 +1,509 @@
+---
+title: "Technical Note 02: Turnaround and Delay Propagation"
+subtitle: "PBWG 2026 Singapore – European study dataset, June–August 2025"
+author: "Performance Review Unit"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    fig-width: 8
+    fig-height: 4.5
+  pdf:
+    documentclass: scrartcl
+    papersize: a4
+    geometry: [margin=2cm]
+    fontsize: 10pt
+    mainfont: Calibri
+    monofont: Consolas
+    toc: true
+    toc-depth: 2
+    colorlinks: true
+    fig-width: 7
+    fig-height: 4
+    fig-pos: "H"
+    echo: false
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(arrow)
+library(gt)
+library(here)
+
+source(here("R", "turnaround-metrics.R"))
+source(here("R", "turnaround-report.R"))
+
+period <- "20250601-20250831"
+hubs   <- c("EGLL", "EHAM", "EDDF", "EDDM", "LFPG", "LSZH", "LTFM", "LIRF", "LEMD", "LPPT")
+ex     <- "EGLL"   # worked example
+
+hd_all <- map(hubs, \(h) ta_load(h, period, here("data", "turnaround"))) |> set_names(hubs)
+apt_names <- c(
+  EGLL = "London Heathrow", EHAM = "Amsterdam Schiphol", EDDF = "Frankfurt", EDDM = "Munich",
+  LFPG = "Paris Charles de Gaulle", LSZH = "Zurich", LTFM = "Istanbul", LIRF = "Rome Fiumicino",
+  LEMD = "Madrid Barajas", LPPT = "Lisbon"
+)
+
+pct <- \(x, d = 0) scales::percent(x, accuracy = 10^-d)
+ex_hd <- hd_all[[ex]]
+tm_all <- map(hd_all, "tm") |> list_rbind()
+ch_all <- map(hd_all, "ch") |> list_rbind()
+
+stt_med <- \(cls) tm_all |> filter(PAIR_QC == "next-dep", TA_CLASS == cls) |>
+  group_by(HUB) |> summarise(M = median(STT, na.rm = TRUE)) |> (\(d) setNames(d$M, d$HUB))()
+eur_med  <- stt_med("EUR-EUR")
+intl_med <- stt_med("INTL-INTL")
+
+ratios <- map(hd_all, \(h) chain_links(h$ch)) |> list_rbind() |> filter(SRC %in% c("APDF", "hub"))
+rr <- \(link) {
+  r <- ratios$DLY_RATIO[ratios$LINK == link]
+  sprintf("%.2f–%.2f", min(r), max(r))
+}
+```
+
+## 1. Introduction
+
+PBWG partners intend to study aircraft **turnarounds** and the **propagation of delay** from one flight to the next. As its contribution, EUROCONTROL/PRU provides a European study dataset for `r length(hubs)` PBWG airports (*hubs*): `r paste(hubs, collapse = ", ")`, covering 1 June – 31 August 2025.
+
+The analysis follows the aircraft one leg either side of its turnaround at the hub:
+
+```{r chain-diagram}
+#| fig-height: 1.6
+#| fig-width: 8
+boxes <- tibble(
+  x = c(1, 2.2, 3.4, 4.6),
+  lbl = c("Upstream leg\nSOBT, AOBT\n@ origin: D0", "Hub arrival\nSIBT, AIBT\nD1",
+          "Hub departure\nSOBT, AOBT\nD2", "Downstream leg\nSIBT, AIBT\n@ destination: D3")
+)
+ggplot(boxes) +
+  geom_segment(aes(x = x + 0.45, xend = x + 0.75, y = 0, yend = 0), data = boxes[1:3, ],
+               arrow = arrow(length = unit(2, "mm"))) +
+  geom_label(aes(x, 0, label = lbl), size = 2.8, label.padding = unit(2.5, "mm")) +
+  annotate("text", x = 2.8, y = 0.38, label = "turnaround (same airframe)", size = 2.6) +
+  coord_cartesian(xlim = c(0.4, 5.2), ylim = c(-0.5, 0.5)) +
+  theme_void()
+```
+
+The work is organised in three layers, consistent with TN-01 and the *PBWG Milestone Tables* technical note:
+
+| Layer | Content | Chapter |
+|---|---|---|
+| 1. Source data | Milestone table: all milestones of hub flights and their remote ends | 2, 3 |
+| 2. Analytic datasets | Per hub: *legs* (one row per flight), *turnarounds* (one row per arrival and next departure) | 3, Appendix A |
+| 3. Algorithms | Turn classification, local turnaround metrics, propagation along the chain | 3–5 |
+
+Chapter 2 describes the data, chapter 3 the method, worked through on `r ex`, with the parameters fixed for all hubs. Chapter 4 applies the same analysis to each hub, and chapter 5 compares the hubs. The appendices contain the data dictionary, the workflow and the list of EUROCONTROL States.
+
+## 2. Data
+
+### 2.1 Sources
+
+| Source | Content | Used for |
+|---|---|---|
+| APDF (IR691), hub | All hub movements: SOBT/SIBT, AOBT/AIBT, ATOT/ALDT, stand, runway, registration, `IM_SAMAD_ID` | Hub milestones; turnaround pairing |
+| APDF (IR691), remote airports | Remote end of hub flights at airports reporting under APDF | Upstream/downstream milestones |
+| NM flight table (`Flx.T_FLIGHT`) | Model 1 (last filed flight plan), Model 3 (flown, updated with surveillance) | Proxy for remote airports without APDF; ICAO24 |
+
+**Join key.** APDF records carry `IM_SAMAD_ID`, which equals the NM flight `ID` (SAM_ID). Hub and remote records of the same flight, and the NM record, are linked on this key. It is a source-specific identifier of the EUROCONTROL systems (`SOURCE_ID` in the milestone table), not a global flight identifier. Partner systems may identify flights differently; no globally unique flight identifier is in use.
+
+::: callout-important
+## UTC throughout
+
+All timestamps are UTC. The Oracle session is set to UTC, every timestamp is forced to UTC on reading, and the study period is defined in UTC. All metrics are durations or differences of UTC timestamps, so summer/winter time plays no role.
+
+**Local time as a descriptor.** Calendar-day notions (overnight stay, time of day) depend on the hub's local time: midnight UTC is 01:00–03:00 local in Europe in summer, and very different for partner regions in Asia or the Americas. The turn classification therefore uses durations only. Local time is derived per hub from its IANA time zone (daylight saving handled by the time zone database) and used only as a descriptor (`OVERNIGHT_LT`, `AIBT_LT_HOUR`).
+:::
+
+**Period and padding.** Hub and remote APDF are read with one day of padding either side of the study period (NM: two days, on LOBT), so turnarounds and legs crossing the period boundary are complete. Only flights and turnarounds whose hub event falls in the period are reported.
+
+### 2.2 Region
+
+*European* (`EUR`) means airports in EUROCONTROL Member States and Comprehensive Agreement States (Israel, Morocco), see Appendix C. Operationally, ICAO location prefixes are used: `E`, `L` (incl. `LL` Israel, `LT` Türkiye), `GC` (Canary Islands), `GM`, `BI`, `BK`[^kosovo], `UD`, `UG`, `UK`. All other airports are *international* (`INTL`). Nearby international airports (North Africa, Middle East, Central Asia) appear as short international turns in the ground-time distributions.
+
+[^kosovo]: Kosovo (`BK`) is not a EUROCONTROL Member State. It is included in `EUR` for this study because its traffic is geographically and operationally intra-European short-haul.
+
+### 2.3 Study airports and coverage
+
+Remote airports form a long tail. A **cutoff of ≥ 4 hub movements per day** (about two daily rotations) defines the *study airports* of a hub. The cutoff only labels airports (`EUR-study` vs `EUR-other`). Data are extracted for all European remote airports, so the cutoff can be changed without re-extraction.
+
+```{r hub-overview}
+#| tbl-cap: "Hub flights and remote-end coverage, June–August 2025"
+map(hd_all, \(h) {
+  cv <- h$cover
+  tibble(
+    FLIGHTS = sum(cv$N),
+    EUR = sum(cv$N[cv$REMOTE_CLASS %in% c("EUR-study", "EUR-other")]) / sum(cv$N),
+    STUDY = nrow(h$study), STUDY_APDF = sum(h$study$APDF),
+    APDF = sum(cv$N[cv$REMOTE_SRC == "APDF"]) / sum(cv$N),
+    NM = sum(cv$N[cv$REMOTE_SRC == "NM"]) / sum(cv$N),
+    BLANK = sum(cv$N[cv$REMOTE_SRC == "BLANK"]) / sum(cv$N),
+    NO_SAM = sum(cv$N[cv$MATCH == "none:no-sam"])
+  )
+}) |> list_rbind(names_to = "HUB") |>
+  gt_doc() |>
+  cols_label(FLIGHTS = "Hub flights", EUR = "EUR legs", STUDY = "Study airports",
+             STUDY_APDF = "of which APDF", APDF = "APDF", NM = "NM proxy", BLANK = "Blank",
+             NO_SAM = "No SAM_ID") |>
+  tab_spanner("Remote end", c(APDF, NM, BLANK)) |>
+  fmt_integer(c(FLIGHTS, NO_SAM)) |> fmt_percent(c(EUR, APDF, NM, BLANK), decimals = 0)
+```
+
+Blank remote ends are almost entirely international legs, which are left blank by design (§3.1). For European legs the remote end is missing only where the hub flight has no SAM_ID, i.e. was not processed by NM. At LTFM, Turkish domestic airports do not report under APDF, so all domestic legs rely on the NM proxy.
+
+## 3. Concept, Model and Methods
+
+### 3.1 Milestone model
+
+Each hub flight has six milestones at each end: SOBT, AOBT, ATOT at the departure airport and ALDT, AIBT, SIBT at the arrival airport. The hub end comes from the hub's APDF. The remote end (origin of an inbound flight, destination of an outbound flight) is filled in this order:
+
+1. **APDF** – the remote airport reports under APDF and the SAM_ID links uniquely.
+2. **NM** – otherwise, the NM flight table linked by SAM_ID, with the proxies of §3.3.
+3. **Blank** – international legs, no SAM_ID at the hub, duplicate SAM_IDs, or no link. Blank milestones are kept as rows with an empty time, so that a partner or a future data release can complete them.
+
+The **turnaround** pairs each hub arrival with the next hub movement of the same registration. All pairs are kept and flagged (`PAIR_QC`); non-turns are filtered in the analysis.
+
+### 3.2 NM fields and the schedule (worked example `r ex`)
+
+On flights where both ends report APDF, NM times agree with APDF (`r ex`, median differences):
+
+| NM field | Equivalent | Median difference to APDF |
+|---|---|---|
+| `AOBT_3` | AOBT | 0 to −1 min |
+| `AOBT_3 + TAXI_TIME_3` | ATOT | 0 min |
+| `ARVT_3` | ALDT (landing, not in-block) | 0 min |
+| `FLT_DUR_3` | ALDT − ATOT | 0 min (IQR < 1) |
+| `TAXI_TIME_1/3` | Taxi-out at the departure airport | ±1 min |
+| `ARVT_1 − EOBT_1` | `TAXI_TIME_1 + FLT_DUR_1` | 0 (by construction) |
+
+NM covers off-block to landing. It has no taxi-in and no schedule (`EOBT_1` is the last filed off-block time). The scheduled block time contains more than the flight plan:
+
+```{r timeline}
+#| tbl-cap: "Scheduled, planned and actual block time on flights with APDF at both ends (median, min)"
+map(hd_all, \(h) ta_timeline(h$legs, h$attr)) |> list_rbind() |>
+  gt_doc(groupname_col = "HUB") |>
+  cols_label(DIR = "", SCHED_BLOCK = "Sched. block", M1_OBT_TO_LDG = "Model 1 off-block→landing",
+             ACT_BLOCK = "Actual block", TAXI_IN = "Taxi-in", FLOWN_MINUS_FILED = "Flown − filed",
+             DEP_DLY = "Dep. delay", ARR_DLY = "Arr. delay") |>
+  fmt_number(-c(HUB, DIR, N), decimals = 0) |> fmt_integer(N)
+```
+
+The schedule holds a buffer beyond the filed flight time and taxi-in. Flights depart late on median and arrive closer to schedule because this buffer absorbs part of the departure delay. Where inbound aircraft fly longer than filed (e.g. arrival holding at EGLL), the buffer is accordingly larger.
+
+### 3.3 Proxy formulas and parameters
+
+For a remote airport without APDF, with the hub's own schedule as anchor:
+
+$$
+\text{SIBT}_{\text{dest}} = \text{SOBT}_{\text{hub}} + \text{TAXI\_TIME}_1 + \text{FLT\_DUR}_1 + B_{\text{out}}
+$$
+
+$$
+\text{SOBT}_{\text{orig}} = \text{SIBT}_{\text{hub}} - B_{\text{in}} - \text{FLT\_DUR}_1 - \text{TAXI\_TIME}_1
+$$
+
+$$
+\text{AOBT}_{\text{orig}} = \text{AOBT}_3, \quad
+\text{ATOT}_{\text{orig}} = \text{AOBT}_3 + \text{TAXI\_TIME}_3, \quad
+\text{ALDT}_{\text{dest}} = \text{ARVT}_3, \quad
+\text{AIBT}_{\text{dest}} = \text{ARVT}_3 + T_{\text{in}}
+$$
+
+$B$ is the scheduled block time not covered by the flight plan (taxi-in plus schedule buffer); $T_{\text{in}}$ is a reference taxi-in. Both are calibrated per hub and direction as medians over the flights with APDF at both ends, and used as given parameters:
+
+```{r params}
+#| tbl-cap: "Proxy parameters per hub (median, min; P25–P75)"
+map(hd_all, "params") |> list_rbind() |>
+  mutate(VAL = sprintf("%.0f (%.0f–%.0f)", MEDIAN, P25, P75)) |>
+  select(HUB, PARAM, VAL) |>
+  pivot_wider(names_from = PARAM, values_from = VAL) |>
+  gt_doc() |> cols_label(B_in = "B_in", B_out = "B_out", T_in = "T_in")
+```
+
+$B$ differs between hubs and must be calibrated per hub. On `r ex`, the AIBT proxy reproduces the actual arrival delay within ±5 min for 90% of flights; the SIBT proxy has an IQR of about 10 min. Proxied schedules are fit for aggregate statistics, not for single-flight interpretation. Results are shown separately by remote source (APDF / NM) throughout.
+
+### 3.4 Turn classification
+
+Turnarounds are classified by the **scheduled ground time** STT = SOBT − SIBT, so that early or late running does not move a turnaround between classes, and no calendar-day criterion is used (§2.1). The turnaround class combines the inbound and outbound leg: `EUR-EUR`, `INTL-INTL`, `mixed`.
+
+| `TURN_TYPE` | EUR–EUR | INTL / mixed |
+|---|---|---|
+| `turn` | STT ≤ 240 min | STT ≤ 360 min |
+| `long-turn` | 240 < STT ≤ 420 | 360 < STT ≤ 420 |
+| `parked` | STT > 420 | STT > 420 |
+| `invalid` | STT or ATT ≤ 0 or missing | |
+| `no-turn` | Next movement is not a departure | |
+
+The thresholds were derived on `r ex` and confirmed for all hubs:
+
+```{r thresholds}
+#| tbl-cap: "Scheduled ground-time distribution per hub and class (turnarounds followed by a departure)"
+tm_all |>
+  filter(PAIR_QC == "next-dep", TA_CLASS %in% c("EUR-EUR", "INTL-INTL")) |>
+  group_by(HUB, TA_CLASS) |>
+  summarise(MED = median(STT, na.rm = TRUE),
+            LE90 = mean(STT <= 90, na.rm = TRUE), LE240 = mean(STT <= 240, na.rm = TRUE),
+            B240_420 = mean(STT > 240 & STT <= 420, na.rm = TRUE),
+            GT420 = mean(STT > 420, na.rm = TRUE),
+            OVN = mean(OVERNIGHT_LT[STT > 420], na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = TA_CLASS, values_from = -c(HUB, TA_CLASS)) |>
+  select(HUB, ends_with("EUR-EUR"), ends_with("INTL-INTL")) |>
+  gt_doc() |>
+  tab_spanner("EUR–EUR", ends_with("EUR-EUR")) |> tab_spanner("INTL–INTL", ends_with("INTL-INTL")) |>
+  cols_label(starts_with("MED") ~ "Median", starts_with("LE90") ~ "≤ 90", starts_with("LE240") ~ "≤ 240",
+             starts_with("B240") ~ "240–420", starts_with("GT420") ~ "> 420",
+             starts_with("OVN") ~ "Overnight if > 420") |>
+  fmt_percent(-c(HUB, starts_with("MED")), decimals = 0)
+```
+
+- **EUR–EUR**: at every hub the distribution peaks within the first 90 minutes (median `r min(eur_med)`–`r max(eur_med)` min), few turnarounds fall between 240 and 420 min, and above 420 min almost all are overnight stays in local time. This confirms the expectation that intra-European turns take less than 2 h, typically 60–90 min.
+- **INTL–INTL**: medians of `r min(intl_med[names(intl_med) != "LTFM"])`–`r max(intl_med)` min with a long tail and no natural gap, so 360 and 420 min are pragmatic limits. LTFM is distinct (median `r intl_med[["LTFM"]]` min): about half of its international turns are scheduled within 90 min, reflecting medium-haul network traffic to Russia, Iran, the Gulf and Central Asia.
+
+### 3.5 Metrics
+
+All delays are signed (negative = early) and in minutes. Local metrics use the hub data only and cover all turnarounds, international included. Chain metrics need both remote ends and apply to EUR–EUR turns.
+
+| Metric | Definition |
+|---|---|
+| STT, ATT | Scheduled / actual ground time: SOBT − SIBT, AOBT − AIBT |
+| Arrival / departure delay $D_1, D_2$ | AIBT − SIBT, AOBT − SOBT at the hub |
+| On-time share | Share with delay ≤ 15 min |
+| Minimum turn time (MTT) | 5th percentile of ATT per class and aircraft type (empirical) |
+| Slack | STT − MTT |
+| Absorbed at hub | $D_1 - D_2$; share of positive arrival delay minutes not carried into the departure |
+| Late arr. → late dep. | Share of arrivals > 15 min late that also depart > 15 min late |
+| Late dep. after late arr. | Share of departures > 15 min late preceded by an arrival > 15 min late |
+| Upstream / downstream delay $D_0, D_3$ | AOBT − SOBT at the origin; AIBT − SIBT at the destination |
+| Recovered on a link | Delay in − delay out ($D_0 - D_1$, $D_1 - D_2$, $D_2 - D_3$, $D_0 - D_3$) |
+| Late carry | Share of flights > 15 min late at the start of a link still > 15 min late at its end |
+| Delay ratio | Positive delay minutes at the end of a link per positive delay minute at its start (> 1: link adds delay) |
+
+The metric set follows common practice in turnaround and delay-propagation analysis (minimum ground times, schedule slack, reactionary delay); it is a pragmatic selection, not a literature review. Delay codes (APDF) and ATFM delay (NM) are carried in the flight-attributes table but not used.
+
+## 4. Airport Analyses
+
+Each hub is analysed with the same structure: data characterisation, local turnaround (including the hub turn link of the chain), upstream leg, and downstream leg with the full chain. In the HTML version each hub is a tab.
+
+::: {.panel-tabset}
+
+```{r airports}
+#| results: asis
+#| echo: false
+for (h in hubs) {
+  hd <- hd_all[[h]]
+  cat(knitr::knit_child(here("_airport.qmd"), envir = environment(), quiet = TRUE), sep = "\n")
+}
+```
+
+:::
+
+## 5. Cross-Airport Comparison
+
+### 5.1 Fleet mix and turn types
+
+```{r cmp-classes}
+#| tbl-cap: "Turnaround classes and share of turns per hub"
+tm_all |>
+  filter(TA_CLASS != "no-dep") |>
+  group_by(HUB) |>
+  summarise(N = n(),
+            EUR = mean(TA_CLASS == "EUR-EUR"), INTL = mean(TA_CLASS == "INTL-INTL"), MIXED = mean(TA_CLASS == "mixed"),
+            TURN_EUR = mean(TURN_TYPE[TA_CLASS == "EUR-EUR"] == "turn"),
+            TURN_INTL = mean(TURN_TYPE[TA_CLASS == "INTL-INTL"] == "turn"),
+            PARKED = mean(TURN_TYPE == "parked")) |>
+  gt_doc() |>
+  cols_label(N = "Arrivals", EUR = "EUR–EUR", INTL = "INTL–INTL", MIXED = "Mixed",
+             TURN_EUR = "EUR–EUR", TURN_INTL = "INTL–INTL", PARKED = "Parked (all)") |>
+  tab_spanner("Class", c(EUR, INTL, MIXED)) |> tab_spanner("Share of turns", c(TURN_EUR, TURN_INTL)) |>
+  fmt_integer(N) |> fmt_percent(-c(HUB, N), decimals = 0)
+```
+
+### 5.2 Local turnaround
+
+```{r cmp-local}
+#| tbl-cap: "Local turnaround metrics, EUR–EUR turns"
+tbl_local(tm_all |> filter(TA_CLASS == "EUR-EUR"), by = "HUB")
+```
+
+```{r cmp-local-intl}
+#| tbl-cap: "Local turnaround metrics, INTL–INTL turns"
+tbl_local(tm_all |> filter(TA_CLASS == "INTL-INTL"), by = "HUB")
+```
+
+### 5.3 Propagation along the chain
+
+```{r cmp-chain}
+#| tbl-cap: "Delay ratio and late carry per link, EUR–EUR turns (remote end APDF; chain: both ends APDF)"
+map(hd_all, \(h) chain_links(h$ch)) |> list_rbind() |>
+  filter(SRC %in% c("APDF", "hub")) |>
+  mutate(LINK = recode(LINK, "1 upstream leg (D0->D1)" = "UP", "2 hub turn (D1->D2)" = "HUB_TURN",
+                       "3 downstream leg (D2->D3)" = "DN", "chain (D0->D3)" = "CHAIN")) |>
+  select(HUB, LINK, DLY_RATIO, LATE_CARRY) |>
+  pivot_wider(names_from = LINK, values_from = c(DLY_RATIO, LATE_CARRY)) |>
+  select(HUB, ends_with("_UP"), ends_with("HUB_TURN"), ends_with("_DN"), ends_with("CHAIN")) |>
+  gt_doc() |>
+  tab_spanner("Upstream leg", ends_with("_UP")) |> tab_spanner("Hub turn", ends_with("HUB_TURN")) |>
+  tab_spanner("Downstream leg", ends_with("_DN")) |> tab_spanner("Full chain", ends_with("CHAIN")) |>
+  cols_label(starts_with("DLY_RATIO") ~ "Delay ratio", starts_with("LATE_CARRY") ~ "Late carry") |>
+  fmt_number(starts_with("DLY_RATIO"), decimals = 2) |> fmt_percent(starts_with("LATE_CARRY"), decimals = 0)
+```
+
+```{r cmp-hubturn}
+#| fig-cap: "Hub turn, EUR–EUR: mean departure delay by arrival delay; dashed: no change"
+#| fig-height: 6
+link_curves(ch_all) |>
+  filter(LINK == "2 hub turn") |>
+  ggplot(aes(XB, Y)) +
+  geom_abline(linetype = "dashed") +
+  geom_line() +
+  facet_wrap(~HUB, ncol = 5) +
+  labs(x = "Arrival delay D1 (min, 5-min bins)", y = "Mean departure delay D2 (min)")
+```
+
+### 5.4 Observations
+
+These results describe one summer and should be read with the coverage of chapter 2 in mind:
+
+- **Flight legs carry delay largely unchanged.** The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
+- **The hub turn is where delay changes most** (delay ratio `r rr("2 hub turn (D1->D2)")`). Early or on-time arrivals still depart with a positive median delay, i.e. delay originating at the hub, while slack in the turn absorbs part of large inbound delays.
+- **Over the full chain** the hubs differ (`r rr("chain (D0->D3)")`): at some hubs the leg buffers outweigh the delay added at the hub, at others the hub adds more than the legs recover. Whether these differences are systematic needs more than one season.
+- **Proxied (NM) remote ends** give results close to those with APDF remote ends, which supports their use for aggregate statistics.
+
+## Appendix A: Data Dictionary
+
+### A.1 Milestone table (layer 1)
+
+`TA-<HUB>-milestones-<period>.parquet`, PBWG milestone convention (TN-01; *PBWG Milestone Tables*), one row per milestone per hub flight.
+
+| Column | Content |
+|---|---|
+| `UID` | Flight key `ADEP-ADES-<SAM_ID>` (APDS ID if no unique SAM_ID) |
+| `FLTID`, `REG`, `TYPE` | From hub APDF |
+| `ICAO24` | From NM (`AIRCRAFT_ADDRESS`) via SAM_ID; blank if not linked |
+| `ADEP`, `ADES` | As reported by the hub APDF |
+| `MST` | `SOBT`, `AOBT`, `ATOT`, `ALDT`, `AIBT`, `SIBT` |
+| `MST_LBL` | Stand (AOBT/AIBT) or runway (ATOT/ALDT), where available |
+| `TIME` | UTC; empty for intentionally blank milestones |
+| `LAT`, `LON`, `ALT` | Empty (ground milestones) |
+| `SOURCE` | `APDF-<ICAO>`, `NM-M3` (NM Model 3), `NM-PROXY` (§3.3); empty if blank |
+| `SOURCE_ID` | SAM_ID (source-specific) |
+| `CONF` | Empty (no out-of-area rows) |
+| `MATCH` | `hub`; for remote rows `sam_id` or the reason for a blank: `none:intl`, `none:no-sam`, `none:dup-sam`, `none:no-link`, `none:circular` |
+| `ROLE` | `ARR`/`DEP` (hub rows), `UP`/`DN` (remote rows) |
+| `MST_TYPE` | `SCH` (SOBT, SIBT) or `ACT` |
+
+### A.2 Legs (layer 2)
+
+`TA-<HUB>-legs-<period>.parquet`, one row per hub flight.
+
+| Column | Content |
+|---|---|
+| `UID`, `HUB`, `LEG` | Flight key; hub; `IN` (to hub) or `OUT` (from hub) |
+| `ADEP`, `ADES`, `REMOTE` | Airports; remote airport |
+| `REMOTE_CLASS` | `EUR-study`, `EUR-other`, `INTL`, `CIRCULAR`, `UNKNOWN` |
+| `REMOTE_APDF` | Remote airport reports under APDF |
+| `REMOTE_SRC`, `MATCH` | `APDF`, `NM`, `BLANK`; link or reason for blank |
+| `FLTID`, `REG`, `TYPE`, `ICAO24` | Flight and airframe |
+| `SOBT` … `SIBT` | Six milestones (UTC) |
+| `IN_PERIOD` | Hub event within the study period |
+
+### A.3 Turnarounds (layer 2)
+
+`TA-<HUB>-turnarounds-<period>.parquet`, one row per hub arrival in the period.
+
+| Column | Content |
+|---|---|
+| `TA_ID` | `<HUB>-<REG>-<AIBT yyyymmddHHMM>` |
+| `ARR_UID`, `DEP_UID` | Inbound and outbound flight (link to legs) |
+| `PAIR_QC` | `next-dep`, `next-arr`, `no-next` |
+| `ARR_CLASS`, `DEP_CLASS`, `ARR_SRC`, `DEP_SRC` | Remote class and source of inbound / outbound leg |
+| `SIBT`, `ALDT`, `AIBT`, `SOBT`, `AOBT`, `ATOT` | Hub milestones (UTC) |
+| `ORIGIN`, `DESTINATION`, stands, runways, flight IDs, `TYPE` | Context |
+| `GROUND_SCH_MIN`, `GROUND_ACT_MIN` | STT and ATT |
+| `OVERNIGHT_UTC`, `TYPE_CHANGE` | AOBT on a later UTC day than AIBT (descriptor); type differs between legs |
+
+### A.4 Flight attributes
+
+`TA-<HUB>-flight-attributes-<period>.parquet`: APDF flight type and delay codes (`DLY1–5`, `DLY_TIME1–5`), NM ATFM fields (`ATFM_DELAY`, `MOST_PEN_REG`, `REG_REASON`, `IATA_DELAY_CODE`), NM Model 1/3 durations. Carried for later use.
+
+## Appendix B: Workflow and Files
+
+| Step | Code | Output (`data/turnaround/`) |
+|---|---|---|
+| Parameters, extraction, linkage, proxies | `R/turnaround.R` (`ta_params()`, `ta_build()`) | `TA-<HUB>-{milestones,legs,turnarounds,flight-attributes}-<period>.parquet` |
+| Run for all hubs | `R/build-turnaround.R` | `TA-<HUB>-{proxy-params,coverage,study-airports}-<period>.csv` |
+| Classification, metrics, chain | `R/turnaround-metrics.R` | (layer 3, in memory) |
+| Tables and figures | `R/turnaround-report.R`, `_airport.qmd` | This note |
+
+Data warehouse results are cached; only missing airports are queried. A further hub requires its ICAO code in `R/build-turnaround.R` and its time zone in `hub_tz`.
+
+## Appendix C: EUROCONTROL States and ICAO Prefixes
+
+Source: https://www.eurocontrol.int/about-us
+
+| State | Joined | ICAO prefix |
+|---|---|---|
+| Belgium | 1963 | EB |
+| France | 1963 | LF |
+| Germany | 1963 | ED, ET |
+| Luxembourg | 1963 | EL |
+| Netherlands | 1963 | EH |
+| United Kingdom | 1963 | EG |
+| Ireland | 1965 | EI |
+| Portugal | 1986 | LP |
+| Greece | 1988 | LG |
+| Malta | 1989 | LM |
+| Türkiye | 1989 | LT |
+| Cyprus | 1991 | LC |
+| Hungary | 1992 | LH |
+| Switzerland | 1992 | LS |
+| Austria | 1993 | LO |
+| Denmark | 1994 | EK |
+| Norway | 1994 | EN |
+| Slovenia | 1995 | LJ |
+| Sweden | 1995 | ES |
+| Czech Republic | 1996 | LK |
+| Italy | 1996 | LI |
+| Romania | 1996 | LR |
+| Bulgaria | 1997 | LB |
+| Croatia | 1997 | LD |
+| Monaco | 1997 | LN |
+| Slovakia | 1997 | LZ |
+| Spain | 1997 | LE, GC |
+| North Macedonia | 1998 | LW |
+| Republic of Moldova | 2000 | LU |
+| Finland | 2001 | EF |
+| Albania | 2002 | LA |
+| Bosnia and Herzegovina | 2004 | LQ |
+| Poland | 2004 | EP |
+| Ukraine | 2004 | UK |
+| Serbia | 2005 | LY |
+| Armenia | 2006 | UD |
+| Lithuania | 2006 | EY |
+| Montenegro | 2007 | LY |
+| Latvia | 2011 | EV |
+| Georgia | 2014 | UG |
+| Estonia | 2015 | EE |
+| Iceland | 2025 | BI |
+| *Comprehensive Agreement States* | | |
+| Israel | 2016 | LL |
+| Morocco | 2016 | GM |
+| *Included for this study (not a Member State)* | | |
+| Kosovo | – | BK |
+
+The study uses the prefixes `E` and `L` as a whole; the few non-member locations under these prefixes carry negligible traffic at the study hubs.
+
+## Appendix D: Open Points
+
+- Thresholds (§3.4) and the empirical MTT definition for PBWG discussion.
+- Separation of hub-generated and reactionary departure delay (delay codes, attributes kept).
+- Expansion to further hubs and to summer 2026 (NM Q3 2026 final).
+- International legs can be completed with partner data (remote SOBT/AOBT/ATOT, ALDT/AIBT/SIBT) in the milestone format of Appendix A.1.

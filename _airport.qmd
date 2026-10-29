@@ -1,0 +1,75 @@
+```{r}
+#| include: false
+hub_name <- apt_names[[hd$hub]]
+n_flights <- sum(hd$cover$N)
+eur_share <- mean(hd$tm$TA_CLASS == "EUR-EUR")
+intl_share <- mean(hd$tm$TA_CLASS == "INTL-INTL")
+cl <- chain_links(hd$ch)
+prm <- setNames(hd$params$MEDIAN, hd$params$PARAM)
+cap <- \(x) paste0(hd$hub, ": ", x)
+```
+
+### `r hd$hub` – `r hub_name`
+
+`r format(n_flights, big.mark = ",")` hub flights and `r format(nrow(hd$tm), big.mark = ",")` arrivals in the study period. `r pct(eur_share)` of the turnarounds are intra-European (EUR–EUR) and `r pct(intl_share)` international (INTL–INTL). Proxy parameters: $B_{\text{in}}$ = `r prm[["B_in"]]` min, $B_{\text{out}}$ = `r prm[["B_out"]]` min, $T_{\text{in}}$ = `r round(prm[["T_in"]], 1)` min.
+
+#### Data characterisation
+
+```{r}
+#| tbl-cap: !expr cap("remote end of hub flights by source")
+tbl_coverage(hd$cover)
+```
+
+```{r}
+#| tbl-cap: !expr cap("intentionally blank remote ends by reason")
+tbl_blanks(hd$cover)
+```
+
+```{r}
+#| tbl-cap: !expr cap("turnaround classes and turn types (share within class)")
+tbl_turn_types(hd$tm)
+```
+
+```{r}
+#| fig-cap: !expr cap("scheduled ground time; dashed lines at 240, 360 and 420 min")
+#| fig-height: 4
+plot_stt(hd$tm)
+```
+
+#### Local turnaround
+
+```{r}
+#| tbl-cap: !expr cap("turnaround metrics at the hub (turns only)")
+tbl_local(hd$tm)
+```
+
+```{r}
+#| fig-cap: !expr cap("arrival and departure delay at the hub (turns only)")
+#| fig-height: 4
+plot_delays(hd$tm)
+```
+
+```{r}
+#| tbl-cap: !expr cap("hub turn, arrival delay D1 to departure delay D2 (EUR–EUR turns)")
+tbl_links(cl, "2 hub turn (D1->D2)")
+```
+
+#### Upstream: inbound leg
+
+```{r}
+#| tbl-cap: !expr cap("upstream departure delay D0 to hub arrival delay D1 (EUR–EUR turns)")
+tbl_links(cl, "1 upstream leg (D0->D1)")
+```
+
+#### Downstream: outbound leg and full chain
+
+```{r}
+#| tbl-cap: !expr cap("hub departure delay D2 to downstream arrival delay D3, and full chain D0 to D3 (EUR–EUR turns)")
+tbl_links(cl, c("3 downstream leg (D2->D3)", "chain (D0->D3)"))
+```
+
+```{r}
+#| fig-cap: !expr cap("delay propagation per link, EUR–EUR turns; mean delay at the end of a link by delay at its start, dashed line = no change")
+#| fig-height: 3.5
+plot_links(hd$ch)
+```
