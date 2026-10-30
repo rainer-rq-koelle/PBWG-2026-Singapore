@@ -85,18 +85,18 @@ tbl_local <- function(tm, by = "TA_CLASS") {
   ta_summary(tm, by) |>
     filter(.data[[by[length(by)]]] != "no-dep") |>
     select(all_of(by), N, STT_MED, ATT_MED, SLACK_MED, ARR_DLY_MED, DEP_DLY_MED,
-           ARR_OTP15, DEP_OTP15, DDI_G, GTO, TDI, LATE_CARRY, DEP_REACT) |>
+           ARR_P15, DEP_P15, DDI_G, GTO, TDI, LATE_CARRY, DEP_REACT) |>
     gt_doc() |>
     cols_label(.list = setNames(list(first_lbl), by[1])) |>
     cols_label(STT_MED = "STT", ATT_MED = "ATT", SLACK_MED = "Slack",
                ARR_DLY_MED = "Arr. delay", DEP_DLY_MED = "Dep. delay",
-               ARR_OTP15 = "Arr. ≤ 15", DEP_OTP15 = "Dep. ≤ 15",
+               ARR_P15 = "Arr. ±15", DEP_P15 = "Dep. ±15",
                DDI_G = "DDI-G", GTO = "GTO", TDI = "TDI",
                LATE_CARRY = "Late arr. → late dep.", DEP_REACT = "Late dep. after late arr.") |>
     fmt_integer(N) |>
     fmt_number(c(STT_MED, ATT_MED, SLACK_MED, ARR_DLY_MED, DEP_DLY_MED), decimals = 0) |>
     fmt_number(c(DDI_G, TDI), decimals = 1) |>
-    fmt_percent(c(ARR_OTP15, DEP_OTP15, GTO, LATE_CARRY, DEP_REACT), decimals = 0) |>
+    fmt_percent(c(ARR_P15, DEP_P15, GTO, LATE_CARRY, DEP_REACT), decimals = 0) |>
     tab_spanner("Median (min)", c(STT_MED, ATT_MED, SLACK_MED, ARR_DLY_MED, DEP_DLY_MED)) |>
     tab_spanner("Turnaround indicators", c(DDI_G, GTO, TDI))
 }
@@ -126,14 +126,72 @@ tbl_atfm <- function(ch, by = "HUB") {
   ta_atfm_split(ch, by) |>
     gt_doc(groupname_col = if (by == "HUB") NULL else by) |>
     cols_label(ATFM = "ATFM delay on", SHARE = "Share", ATFM_ARR = "ATFM arr.", ATFM_DEP = "ATFM dep.",
-               ARR_DLY = "Arr. delay", DEP_DLY = "Dep. delay", DEP_OTP15 = "Dep. ≤ 15",
+               ARR_DLY = "Arr. delay", DEP_DLY = "Dep. delay", DEP_P15 = "Dep. ±15",
                DDI_G = "DDI-G", TDI = "TDI", DDI_F_DN = "DDI-F down") |>
-    fmt_integer(N) |> fmt_percent(c(SHARE, DEP_OTP15), decimals = 0) |>
+    fmt_integer(N) |> fmt_percent(c(SHARE, DEP_P15), decimals = 0) |>
     fmt_number(c(ATFM_ARR, ATFM_DEP, ARR_DLY, DEP_DLY, DDI_G, TDI, DDI_F_DN), decimals = 1) |>
     tab_spanner("Mean (min)", c(ATFM_ARR, ATFM_DEP, ARR_DLY, DEP_DLY, DDI_G, TDI, DDI_F_DN))
 }
 
+# Driver breakdown table: one block per driver flag (turns; flagged vs not flagged)
+driver_flags <- c("Early in-block" = "EARLY_IBT", "Stand blocked at landing" = "STAND_BLOCKED",
+                  "Long taxi-out" = "LONG_TXOT", "ATFM delay (outbound)" = "ATFM_DEP_FLAG")
+
+tbl_drivers <- function(ch, by = "HUB") {
+  imap(driver_flags, \(f, nm) ta_flag_split(ch, f, by) |> mutate(DRIVER = nm)) |>
+    list_rbind() |>
+    mutate(FLAG = if_else(FLAG, "yes", "no")) |>
+    select(DRIVER, FLAG, N, SHARE, ARR_DLY, DEP_DLY, DEP_P15, TXIT, TXOT, DDI_G, TDI, DDI_F_DN) |>
+    gt_doc(groupname_col = "DRIVER") |>
+    cols_label(FLAG = "Flag", SHARE = "Share", ARR_DLY = "Arr. delay", DEP_DLY = "Dep. delay",
+               DEP_P15 = "Dep. ±15", TXIT = "Taxi-in", TXOT = "Taxi-out", DDI_G = "DDI-G", TDI = "TDI",
+               DDI_F_DN = "DDI-F down") |>
+    fmt_integer(N) |> fmt_percent(c(SHARE, DEP_P15), decimals = 0) |>
+    fmt_number(c(ARR_DLY, DEP_DLY, TXIT, TXOT, DDI_G, TDI, DDI_F_DN), decimals = 1) |>
+    tab_spanner("Mean (min)", c(ARR_DLY, DEP_DLY, TXIT, TXOT, DDI_G, TDI, DDI_F_DN))
+}
+
 # ---- figures -----------------------------------------------------------------
+
+# GANP punctuality envelopes (for information): share within +/-5 and +/-15 min, early/late beyond
+punct_long <- function(ch) {
+  t <- ch |> filter(TURN_TYPE == "turn")
+  bind_rows(
+    t |> transmute(HUB, MS = "Hub arrival (AIBT)", D = D1),
+    t |> transmute(HUB, MS = "Hub departure (AOBT)", D = D2),
+    t |> filter(TA_CLASS == "EUR-EUR") |> transmute(HUB, MS = "Upstream departure (AOBT)", D = D0),
+    t |> filter(TA_CLASS == "EUR-EUR") |> transmute(HUB, MS = "Downstream arrival (AIBT)", D = D3)
+  ) |>
+    filter(!is.na(D)) |>
+    mutate(
+      BAND = cut(D, c(-Inf, -15, -5, 5, 15, Inf), right = FALSE,
+                 labels = c("≤ −15 (early)", "−15 to −5", "−5 to +5", "+5 to +15", "≥ +15 (late)")),
+      MS = factor(MS, levels = c("Upstream departure (AOBT)", "Hub arrival (AIBT)",
+                                 "Hub departure (AOBT)", "Downstream arrival (AIBT)"))
+    ) |>
+    count(HUB, MS, BAND) |>
+    group_by(HUB, MS) |> mutate(SHARE = n / sum(n)) |> ungroup()
+}
+
+plot_punct <- function(ch) {
+  ggplot(punct_long(ch), aes(SHARE, HUB, fill = BAND)) +
+    geom_col(position = position_stack(reverse = TRUE)) +
+    facet_wrap(~MS, ncol = 2) +
+    scale_x_continuous(labels = scales::percent) +
+    scale_fill_brewer(palette = "RdBu", direction = -1) +
+    labs(x = "Share of turns", y = NULL, fill = "Deviation from\nschedule (min)") +
+    guides(fill = guide_legend(nrow = 2)) +
+    theme(legend.position = "bottom")
+}
+
+plot_txot <- function(ch, th = ta_thresholds$long_txot) {
+  ggplot(ch |> filter(!is.na(TXOT), TXOT > 0, TXOT < 120), aes(TXOT)) +
+    geom_histogram(binwidth = 1) +
+    geom_vline(xintercept = th, linetype = "dashed") +
+    scale_y_log10() +
+    facet_wrap(~HUB, ncol = 5) +
+    labs(x = "Taxi-out ATOT − AOBT (min); dashed: exploratory threshold", y = "Departures (log scale)")
+}
 
 plot_stt <- function(tm) {
   ggplot(tm |> filter(PAIR_QC == "next-dep", TA_CLASS %in% c("EUR-EUR", "INTL-INTL"),
@@ -186,7 +244,7 @@ plot_links <- function(ch) {
 daily_long <- function(daily) {
   daily |>
     transmute(HUB, OPDAY, WDAY,
-              `Dep. ≤ 15 (%)` = 100 * DEP_OTP15, `Arr. ≤ 15 (%)` = 100 * ARR_OTP15,
+              `Dep. ±15 (%)` = 100 * DEP_P15, `Arr. ±15 (%)` = 100 * ARR_P15,
               `Dep. delay (min)` = DEP_DLY, `TDI (min)` = TDI, `DDI-G (min)` = DDI_G,
               `DDI-F down (min)` = DDI_F_DN, `ATFM dep. (min)` = ATFM_DEP_MEAN) |>
     pivot_longer(-c(HUB, OPDAY, WDAY), names_to = "IND") |>
@@ -210,7 +268,7 @@ plot_daily <- function(daily) {
 
 plot_weekday <- function(daily_all) {
   daily_long(daily_all) |>
-    filter(IND %in% c("Dep. ≤ 15 (%)", "TDI (min)", "DDI-G (min)", "ATFM dep. (min)")) |>
+    filter(IND %in% c("Dep. ±15 (%)", "TDI (min)", "DDI-G (min)", "ATFM dep. (min)")) |>
     group_by(HUB, IND, WDAY) |>
     summarise(M = median(value, na.rm = TRUE), .groups = "drop") |>
     ggplot(aes(WDAY, M, group = HUB)) +

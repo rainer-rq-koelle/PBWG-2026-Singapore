@@ -81,6 +81,13 @@ plot_links(hd$ch)
 tbl_atfm(hd$ch)
 ```
 
+#### Local drivers
+
+```{r}
+#| tbl-cap: !expr cap("turns with and without each driver flag (turns; DDI-F down on EUR–EUR turns)")
+tbl_drivers(hd$ch)
+```
+
 #### Daily view
 
 ```{r}

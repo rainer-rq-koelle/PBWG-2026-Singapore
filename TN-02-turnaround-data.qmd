@@ -292,13 +292,23 @@ All delays are signed (negative = early) and in minutes. Local metrics use the h
 | STT, ATT | Scheduled / actual ground time: SOBT − SIBT, AOBT − AIBT |
 | Arrival / departure delay $D_1, D_2$ | AIBT − SIBT, AOBT − SOBT at the hub |
 | Upstream / downstream delay $D_0, D_3$ | AOBT − SOBT at the origin; AIBT − SIBT at the destination |
-| On-time share | Share with delay ≤ 15 min |
+| Punctuality (GANP KPI01 / KPI14) | Share within the ±15 min window; 15 min or more before / after schedule = early / late. The ±5 min window is shown for information |
 | Minimum turn time (MTT) | 5th percentile of ATT per class and aircraft type (empirical) |
 | Slack | STT − MTT |
-| Late arr. → late dep. | Share of arrivals > 15 min late that also depart > 15 min late |
-| Late dep. after late arr. | Share of departures > 15 min late preceded by an arrival > 15 min late |
-| Late carry | Share of flights > 15 min late at the start of a link still > 15 min late at its end |
+| Late arr. → late dep. | Share of arrivals ≥ 15 min late that also depart ≥ 15 min late |
+| Late dep. after late arr. | Share of departures ≥ 15 min late preceded by an arrival ≥ 15 min late |
+| Late carry | Share of flights ≥ 15 min late at the start of a link still ≥ 15 min late at its end |
 | Delay ratio | Positive delay minutes at the end of a link per positive delay minute at its start (> 1: link adds delay) |
+
+**Local drivers (exploratory).** Turns are flagged for conditions that may explain delay at the hub. Each flag splits the turns into two groups; differences between the groups are descriptive, and the flags overlap.
+
+| Flag | Definition |
+|---|---|
+| Early in-block | AIBT 15 min or more before SIBT (GANP window) |
+| Early landing | ALDT + hub median taxi-in 15 min or more before SIBT (expected landing time, cf. AIU early arrivals analysis) |
+| Stand blocked at landing | The arrival's stand (stand reported with AIBT) is still occupied by the previous aircraft (its AOBT) more than 1 min after ALDT. Hub APDF only; towing is not visible in APDF |
+| Long taxi-out | ATOT − AOBT > `r ta_thresholds$long_txot` min, the same exploratory value for all hubs |
+| ATFM delay (outbound) | NM ATFM delay of the departing flight > 0 |
 
 **Daily view.** Indicators are also computed per local operating day, which runs from 04:00 to 04:00 local time at the hub. A turnaround is assigned to the operating day of its SIBT, so a delayed flight stays with the day it was scheduled for. The daily view is descriptive. It shows how individual days and weekdays relate to the period values; no thresholds are applied.
 
@@ -412,8 +422,8 @@ link_curves(ch_all) |>
 ```{r cmp-atfm}
 #| tbl-cap: "Turns by ATFM delay of the inbound and outbound flight (NM-linked turns, all classes)"
 ta_atfm_split(ch_all) |>
-  select(HUB, ATFM, SHARE, DEP_DLY, DEP_OTP15, TDI) |>
-  pivot_wider(names_from = ATFM, values_from = c(SHARE, DEP_DLY, DEP_OTP15, TDI)) |>
+  select(HUB, ATFM, SHARE, DEP_DLY, DEP_P15, TDI) |>
+  pivot_wider(names_from = ATFM, values_from = c(SHARE, DEP_DLY, DEP_P15, TDI)) |>
   select(HUB, starts_with("SHARE"), starts_with("DEP_DLY"), starts_with("TDI")) |>
   gt_doc() |>
   tab_spanner("Share of turns", starts_with("SHARE")) |>
@@ -427,7 +437,42 @@ ta_atfm_split(ch_all) |>
 
 ATFM delay is assigned to the flight that is regulated; it is part of that flight's departure delay. The split shows how much of the departure delay and of the delay added during the turn (TDI) coincides with ATFM regulations on the inbound or outbound flight. It is a descriptive breakdown, not an attribution of cause.
 
-### 5.5 Daily view and weekday pattern
+### 5.5 Punctuality windows
+
+```{r cmp-punct}
+#| fig-cap: "Deviation from schedule by milestone, turns (upstream/downstream: EUR–EUR turns with remote end); GANP windows ±5 and ±15 min, for information"
+#| fig-height: 6.5
+plot_punct(ch_all)
+```
+
+### 5.6 Local drivers
+
+```{r cmp-drivers}
+#| tbl-cap: "Share of turns flagged and mean departure delay / TDI with and without the flag"
+imap(driver_flags, \(f, nm) ta_flag_split(ch_all, f) |> mutate(DRIVER = nm)) |>
+  list_rbind() |>
+  mutate(FLAG = if_else(FLAG, "yes", "no")) |>
+  select(DRIVER, HUB, FLAG, SHARE, DEP_DLY, TDI) |>
+  pivot_wider(names_from = FLAG, values_from = c(SHARE, DEP_DLY, TDI)) |>
+  select(DRIVER, HUB, SHARE_yes, DEP_DLY_no, DEP_DLY_yes, TDI_no, TDI_yes) |>
+  gt_doc(groupname_col = "DRIVER") |>
+  cols_label(SHARE_yes = "Flagged", DEP_DLY_no = "no", DEP_DLY_yes = "yes", TDI_no = "no", TDI_yes = "yes") |>
+  tab_spanner("Mean dep. delay (min)", c(DEP_DLY_no, DEP_DLY_yes)) |>
+  tab_spanner("Mean TDI (min)", c(TDI_no, TDI_yes)) |>
+  fmt_percent(SHARE_yes, decimals = 1) |> fmt_number(-c(DRIVER, HUB, SHARE_yes), decimals = 1)
+```
+
+```{r cmp-txot}
+#| fig-cap: "Taxi-out time per hub (log scale); dashed: exploratory long taxi-out threshold"
+#| fig-height: 4.5
+plot_txot(ch_all)
+```
+
+The taxi-out distributions decay smoothly at most hubs, without a natural break; EGLL and LIRF have long tails. The threshold of `r ta_thresholds$long_txot` min is therefore a pragmatic, uniform value for this exploratory step, not an operational limit. Long taxi-out happens after AOBT and does not change the departure delay at the hub; it is absorbed (or not) by the block time of the downstream flight.
+
+Early arrivals lengthen the actual ground time and therefore raise DDI-G, while TDI neutralises them. The stand-blocked flag is consistent with the AIU early arrivals analysis: early landings meet a blocked stand more often than other landings, and their taxi-in is longer.
+
+### 5.7 Daily view and weekday pattern
 
 ```{r cmp-weekday}
 #| fig-cap: "Weekday pattern: median over the operating days of each weekday, one line per hub"
@@ -435,13 +480,15 @@ ATFM delay is assigned to the flight that is regulated; it is part of that fligh
 plot_weekday(map(hd_all, "daily") |> list_rbind())
 ```
 
-### 5.6 Observations
+### 5.8 Observations
 
 These results describe one summer and should be read with the coverage of chapter 2 in mind:
 
 - **Flight legs reduce delay.** Mean DDI-F is negative on both legs at every hub, and BTO is mostly around 15–30%, at or below CODA's 30–35% planning range. The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
 - **The hub turn adds delay.** GTO is about 70–80%: most turns take longer than scheduled, and mean DDI-G is positive at every hub (delay ratio `r rr("2 hub turn (D1->D2)")`). TDI, which neutralises early arrivals, is lower but positive at most hubs. Early or on-time arrivals still depart with a positive median delay, while slack in the turn absorbs part of large inbound delays.
 - **ATFM delay accounts for part of the departure delay but not all of it.** Turns whose outbound flight carried ATFM delay depart markedly later, while turns without any ATFM delay still show positive mean departure delay and TDI at most hubs.
+- **Punctuality windows.** Within the GANP ±15 min window, departures are punctual for roughly half to two thirds of turns at most hubs; almost no departure is 15 min or more early. Arrivals are early (15 min or more before SIBT) for 7–25% of turns, most at LTFM, EGLL and LEMD, consistent with the AIU early arrivals analysis.
+- **Local drivers.** Early in-blocks raise DDI-G by construction (longer actual ground time) but come with lower departure delay. Stand blocked at landing is frequent at some hubs (EDDF, EGLL, EDDM) but shows little difference in departure delay or TDI, i.e. it does not appear as a driver of departure delay in this data. Long taxi-out is rare (mostly < 1% of turns; EGLL 2%, LIRF 5%); at most hubs these turns also depart later, whereas at LIRF they depart earlier than other turns, which could indicate that aircraft leave the stand on time and wait on the taxiway. This is a hypothesis for discussion, not a finding.
 - **Over the full chain** the hubs differ (`r rr("chain (D0->D3)")`): at some hubs the leg buffers outweigh the delay added at the hub, at others the hub adds more than the legs recover. Whether these differences are systematic needs more than one season.
 - **Daily view.** Per-hub timelines (chapter 4) show that period values hide considerable day-to-day variation; a few days with high departure delay and ATFM delay stand out at several hubs. Their operational interpretation is left for discussion.
 - **Proxied (NM) remote ends** give results close to those with APDF remote ends, which supports their use for aggregate statistics.

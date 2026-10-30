@@ -8,9 +8,19 @@ library(dplyr)
 ta_thresholds <- list(
   eur_turn_max  = 240,   # EUR-EUR: rotation if STT <= 240
   intl_turn_max = 360,   # INTL: rotation if STT <= 360
-  park_min      = 420,   # STT > 420 or overnight: parked / not a turn
-  mtt_quantile  = 0.05   # empirical minimum turn time per class x aircraft type
+  park_min      = 420,   # STT > 420: parked / not a turn
+  mtt_quantile  = 0.05,  # empirical minimum turn time per class x aircraft type
+  punct         = 15,    # GANP KPI01/KPI14 window: early <= -15, late >= +15
+  punct_inner   = 5,     # inner window +/-5 (for information)
+  long_txot     = 40,    # exploratory: taxi-out ATOT - AOBT > 40 min (same for all hubs)
+  stand_grace   = 1      # stand blocked if still occupied 1 min after ALDT (AIU early arrivals)
 )
+
+# GANP punctuality band of a signed delay (min): ICAO window, 15 min or more = early / late
+punct_band <- function(d, w = ta_thresholds$punct) {
+  factor(case_when(is.na(d) ~ NA_character_, d <= -w ~ "early", d >= w ~ "late", TRUE ~ "within"),
+         levels = c("early", "within", "late"))
+}
 
 # Turnaround class from the remote class of the inbound and outbound leg
 ta_class <- function(arr_class, dep_class) {
@@ -101,11 +111,23 @@ ta_metrics <- function(tr, th = ta_thresholds) {
       SLACK    = STT - MTT,
       PROP_EXP = pmax(0, ARR_DLY - SLACK),
       PROP_OBS = pmin(pmax(ARR_DLY, 0), pmax(DEP_DLY, 0)),
-      ARR_LATE15 = ARR_DLY > 15,
-      DEP_LATE15 = DEP_DLY > 15,
+      # GANP punctuality window (KPI14 / KPI01): >= 15 min late, <= -15 min early
+      ARR_BAND   = punct_band(ARR_DLY, th$punct),
+      DEP_BAND   = punct_band(DEP_DLY, th$punct),
+      ARR_LATE15 = ARR_DLY >= th$punct,
+      DEP_LATE15 = DEP_DLY >= th$punct,
+      # Early arrivals: in-block, and landing (ALDT + hub median taxi-in vs SIBT)
+      TXIT = as.numeric(difftime(AIBT, ALDT, units = "mins")),
+      TXOT = as.numeric(difftime(ATOT, AOBT, units = "mins")),
+      EARLY_IBT = ARR_DLY <= -th$punct,
+      LONG_TXOT = TXOT > th$long_txot,
       # Operating day (local, from OPDAY_START_H) of the scheduled arrival
       OPDAY = op_day(SIBT, HUB)
-    )
+    ) |>
+    group_by(HUB) |>
+    mutate(TXIT_REF = median(TXIT[between(TXIT, 0, 60)], na.rm = TRUE),
+           EARLY_LDG = as.numeric(difftime(ALDT, SIBT, units = "mins")) + TXIT_REF <= -th$punct) |>
+    ungroup()
 }
 
 # Local operating day: calendar date of (t - OPDAY_START_H) in the hub's time zone.
@@ -173,7 +195,12 @@ ta_chain <- function(tm, legs, attr = NULL) {
       left_join(atfm |> rename(ARR_UID = UID, ATFM_ARR = ATFM), by = "ARR_UID") |>
       left_join(atfm |> rename(DEP_UID = UID, ATFM_DEP = ATFM), by = "DEP_UID")
   }
-  ch
+  ch |>
+    left_join(ta_stand_blocked(legs, ch), by = "ARR_UID") |>
+    mutate(
+      D0_BAND = punct_band(D0), D3_BAND = punct_band(D3),
+      ATFM_DEP_FLAG = ATFM_DEP > 0
+    )
 }
 
 # Summary of one link of the chain: delay in (x) -> delay out (y)
@@ -191,7 +218,7 @@ link_summary <- function(x, y, over = NULL, late = 15) {
     DDI_MED    = median(y - x),
     OVERSHOOT  = if (is.null(over)) NA_real_ else mean(over, na.rm = TRUE),
     # Of the flights late (> 15) at the start: share still late at the end
-    LATE_CARRY = sum(x > late & y > late) / sum(x > late),
+    LATE_CARRY = sum(x >= late & y >= late) / sum(x >= late),
     # Positive delay minutes at the end per positive delay minute at the start
     DLY_RATIO  = sum(pmax(y, 0)) / sum(pmax(x, 0))
   )
@@ -219,6 +246,51 @@ ta_chain_summary <- function(ch, by = c("HUB", "TA_CLASS")) {
     filter(SRC %in% c("hub", "APDF", "NM", "with-NM"))
 }
 
+# Stand blocked at landing (local, hub APDF only): the arrival's stand (STND at AIBT) is still
+# occupied by the previous aircraft (its AOBT) more than `grace` min after this arrival's ALDT.
+# Occupancy from APDF: AIBT -> next AOBT of the same aircraft at that stand (towing not visible).
+ta_stand_blocked <- function(legs, hub_arr, grace = ta_thresholds$stand_grace) {
+  occ <- hub_arr |>
+    filter(!is.na(ARR_STND), !is.na(AIBT)) |>
+    transmute(ARR_UID, STND = ARR_STND, OCC_FROM = AIBT, OCC_TO = AOBT)
+  arr <- hub_arr |>
+    filter(!is.na(ARR_STND), !is.na(ALDT), !is.na(AIBT)) |>
+    transmute(ARR_UID, STND = ARR_STND, ALDT, AIBT)
+  # previous occupant of the same stand: the latest in-block before this arrival's in-block
+  arr |>
+    inner_join(occ, by = "STND", suffix = c("", ".prev"), relationship = "many-to-many") |>
+    filter(ARR_UID != ARR_UID.prev, OCC_FROM < AIBT) |>
+    group_by(ARR_UID) |>
+    slice_max(OCC_FROM, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    transmute(ARR_UID,
+              PREV_OFF = OCC_TO,
+              STAND_BLOCKED = !is.na(OCC_TO) & OCC_TO > ALDT + grace * 60,
+              STAND_WAIT = pmax(0, as.numeric(difftime(OCC_TO, ALDT, units = "mins"))))
+}
+
+# Driver breakdown: indicators split by a logical flag (descriptive; no causal attribution)
+ta_flag_split <- function(ch, flag, by = "HUB", class = NULL) {
+  d <- ch |> filter(TURN_TYPE == "turn", !is.na(.data[[flag]]))
+  if (!is.null(class)) d <- d |> filter(TA_CLASS %in% class)
+  d |>
+    group_by(across(all_of(by)), FLAG = .data[[flag]]) |>
+    summarise(
+      N        = n(),
+      ARR_DLY  = mean(ARR_DLY),
+      DEP_DLY  = mean(DEP_DLY),
+      DEP_P15  = mean(DEP_BAND == "within"),
+      TXIT     = mean(TXIT, na.rm = TRUE),
+      TXOT     = mean(TXOT, na.rm = TRUE),
+      DDI_G    = mean(DDI_G),
+      TDI      = mean(TDI),
+      DDI_F_DN = mean(DDI_F_DN[TA_CLASS == "EUR-EUR"], na.rm = TRUE),
+      .groups  = "drop_last"
+    ) |>
+    mutate(SHARE = N / sum(N), .after = N) |>
+    ungroup()
+}
+
 # Daily view per local operating day (turns only; chain indicators on EUR-EUR turns).
 # Descriptive: puts the period summaries into perspective, no thresholds applied.
 ta_daily <- function(ch, by = c("HUB", "OPDAY")) {
@@ -228,8 +300,8 @@ ta_daily <- function(ch, by = c("HUB", "OPDAY")) {
     group_by(across(all_of(by))) |>
     summarise(
       N_TURNS   = n(),
-      ARR_OTP15 = mean(!ARR_LATE15),
-      DEP_OTP15 = mean(!DEP_LATE15),
+      ARR_P15 = mean(ARR_BAND == "within"),
+      DEP_P15 = mean(DEP_BAND == "within"),
       ARR_DLY   = mean(ARR_DLY),
       DEP_DLY   = mean(DEP_DLY),
       DDI_G     = mean(DDI_G),
@@ -280,7 +352,7 @@ ta_atfm_split <- function(ch, by = "HUB") {
       ATFM_DEP  = mean(ATFM_DEP),
       ARR_DLY   = mean(ARR_DLY),
       DEP_DLY   = mean(DEP_DLY),
-      DEP_OTP15 = mean(!DEP_LATE15),
+      DEP_P15 = mean(DEP_BAND == "within"),
       DDI_G     = mean(DDI_G),
       TDI       = mean(TDI),
       DDI_F_DN  = mean(DDI_F_DN[TA_CLASS == "EUR-EUR"], na.rm = TRUE),
@@ -302,8 +374,12 @@ ta_summary <- function(tm, by = "TA_CLASS") {
       SLACK_MED    = median(SLACK, na.rm = TRUE),
       ARR_DLY_MED  = median(ARR_DLY),
       DEP_DLY_MED  = median(DEP_DLY),
-      ARR_OTP15    = mean(!ARR_LATE15),
-      DEP_OTP15    = mean(!DEP_LATE15),
+      ARR_P15      = mean(ARR_BAND == "within"),
+      ARR_EARLY    = mean(ARR_BAND == "early"),
+      ARR_LATE     = mean(ARR_BAND == "late"),
+      DEP_P15      = mean(DEP_BAND == "within"),
+      DEP_EARLY    = mean(DEP_BAND == "early"),
+      DEP_LATE     = mean(DEP_BAND == "late"),
       DDI_G        = mean(DDI_G),
       GTO          = mean(GTO_FLAG),
       TDI          = mean(TDI),
