@@ -392,3 +392,128 @@ ta_summary <- function(tm, by = "TA_CLASS") {
       .groups = "drop"
     )
 }
+
+# ---- rotation accounting, available time, transitions, tails, data quality --------------
+
+# Rotation waterfall (exact identity, also for means):
+#   D3 = D0 + DDI-F(up) + DDI-G + DDI-F(down)
+# Only turns with all four delays observed (EUR-EUR turns with both remote ends).
+ta_waterfall <- function(ch, by = "HUB") {
+  ch |>
+    filter(TURN_TYPE == "turn", TA_CLASS == "EUR-EUR", !is.na(D0), !is.na(D3)) |>
+    group_by(across(all_of(by))) |>
+    summarise(
+      N        = n(),
+      D0       = mean(D0),
+      DDI_F_UP = mean(D1 - D0),
+      DDI_G    = mean(D2 - D1),
+      DDI_F_DN = mean(D3 - D2),
+      D3       = mean(D3),
+      .groups  = "drop"
+    )
+}
+
+# Available turnaround after actual arrival and the reference departure-delay floor
+#   T_V   = SOBT - AIBT = STT - D1            (may be negative)
+#   MARGIN_V = T_V - MTT                      (margin left vs the empirical reference turn)
+#   D2_FLOOR = max(0, AIBT + MTT - SOBT)      (= PROP_EXP; scenario conditional on MTT)
+#   D2_EXCESS = D2 - D2_FLOOR                 (departure delay beyond the reference floor)
+ta_available <- function(ch) {
+  ch |>
+    mutate(
+      T_V       = STT - D1,
+      MARGIN_V  = T_V - MTT,
+      D2_FLOOR  = pmax(0, MTT - T_V),
+      D2_EXCESS = D2 - D2_FLOOR
+    )
+}
+
+# Recovery curve: departure punctuality / delay against the available margin (5-min bins)
+ta_margin_curve <- function(ch, class = c("EUR-EUR", "INTL-INTL"), min_n = 30) {
+  ta_available(ch) |>
+    filter(TURN_TYPE == "turn", TA_CLASS %in% class, !is.na(MARGIN_V), between(MARGIN_V, -60, 120)) |>
+    mutate(XB = floor(MARGIN_V / 5) * 5 + 2.5) |>
+    group_by(HUB, TA_CLASS, XB) |>
+    summarise(N = n(), DEP_LATE = mean(DEP_BAND == "late"), D2 = mean(D2), .groups = "drop") |>
+    filter(N >= min_n)
+}
+
+# Departure delay split into the reference floor and the excess (means, turns)
+ta_floor_split <- function(ch, by = c("HUB", "TA_CLASS")) {
+  ta_available(ch) |>
+    filter(TURN_TYPE == "turn", !is.na(MTT), TA_CLASS %in% c("EUR-EUR", "INTL-INTL")) |>
+    group_by(across(all_of(by))) |>
+    summarise(
+      N          = n(),
+      D2_POS     = mean(pmax(D2, 0)),
+      FLOOR      = mean(D2_FLOOR),
+      FLOOR_SHARE = mean(D2_FLOOR > 0),
+      EXCESS_POS = mean(pmax(D2 - D2_FLOOR, 0)),
+      .groups    = "drop"
+    )
+}
+
+# Punctuality transition across a link, multi-band (GANP window plus severity bands)
+delay_band5 <- function(d) {
+  cut(d, c(-Inf, -15, 15, 30, 60, Inf), right = FALSE,
+      labels = c("early (≤ −15)", "within ±15", "15–30", "30–60", "≥ 60"))
+}
+
+ta_transition <- function(ch, from = "D1", to = "D2", class = NULL) {
+  d <- ch |> filter(TURN_TYPE == "turn", !is.na(.data[[from]]), !is.na(.data[[to]]))
+  if (!is.null(class)) d <- d |> filter(TA_CLASS %in% class)
+  d |>
+    transmute(HUB, FROM = delay_band5(.data[[from]]), TO = delay_band5(.data[[to]])) |>
+    count(HUB, FROM, TO) |>
+    group_by(HUB, FROM) |> mutate(P = n / sum(n)) |> ungroup()
+}
+
+# Four-state summary of a transition (punctuality maintained / restored / lost / late persists)
+ta_transition4 <- function(ch, from = "D1", to = "D2", class = NULL, tau = ta_thresholds$punct) {
+  d <- ch |> filter(TURN_TYPE == "turn", !is.na(.data[[from]]), !is.na(.data[[to]]))
+  if (!is.null(class)) d <- d |> filter(TA_CLASS %in% class)
+  d |>
+    mutate(L_IN = .data[[from]] >= tau, L_OUT = .data[[to]] >= tau) |>
+    group_by(HUB) |>
+    summarise(
+      N          = n(),
+      MAINTAINED = mean(!L_IN & !L_OUT),
+      RESTORED   = mean(L_IN & !L_OUT),
+      LOST       = mean(!L_IN & L_OUT),
+      PERSISTS   = mean(L_IN & L_OUT),
+      .groups    = "drop"
+    )
+}
+
+# Tail burden of positive departure delay: share of delay minutes carried by the worst turns
+ta_tail <- function(ch, class = "EUR-EUR") {
+  ch |>
+    filter(TURN_TYPE == "turn", TA_CLASS %in% class) |>
+    group_by(HUB) |>
+    summarise(
+      N         = n(),
+      D2_P50    = median(D2),
+      D2_P90    = quantile(D2, 0.90, names = FALSE),
+      D2_P95    = quantile(D2, 0.95, names = FALSE),
+      D2_LATE   = mean(D2[D2 > 0]),
+      TOP5      = { p <- sort(pmax(D2, 0), decreasing = TRUE); sum(head(p, ceiling(0.05 * n()))) / sum(p) },
+      TOP10     = { p <- sort(pmax(D2, 0), decreasing = TRUE); sum(head(p, ceiling(0.10 * n()))) / sum(p) },
+      .groups   = "drop"
+    )
+}
+
+# Data-quality panel: links, chronology, observation window (hub flights in period)
+ta_quality <- function(legs, tm) {
+  hub <- legs |> filter(IN_PERIOD)
+  arr <- hub |> filter(LEG == "IN"); dep <- hub |> filter(LEG == "OUT")
+  tibble(
+    HUB            = unique(hub$HUB),
+    ARRIVALS       = nrow(arr),
+    NEXT_DEP       = mean(tm$PAIR_QC == "next-dep"),
+    ARR_CHRONO     = mean(arr$ALDT <= arr$AIBT, na.rm = TRUE),
+    DEP_CHRONO     = mean(dep$AOBT <= dep$ATOT, na.rm = TRUE),
+    TURN_CHRONO    = mean(tm$AOBT[tm$PAIR_QC == "next-dep"] > tm$AIBT[tm$PAIR_QC == "next-dep"], na.rm = TRUE),
+    SCHED_VALID    = mean(tm$STT[tm$PAIR_QC == "next-dep"] > 0, na.rm = TRUE),
+    REMOTE_EUR     = mean(hub$REMOTE_SRC[hub$REMOTE_CLASS != "INTL"] != "BLANK")
+  )
+}

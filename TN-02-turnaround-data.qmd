@@ -160,6 +160,17 @@ map(hd_all, \(h) {
 
 Blank remote ends are almost entirely international legs, which are left blank by design (§3.1). For European legs the remote end is missing only where the hub flight has no SAM_ID, i.e. was not processed by NM. At LTFM, Turkish domestic airports do not report under APDF, so all domestic legs rely on the NM proxy.
 
+### 2.4 Data quality and limitations
+
+```{r quality}
+#| tbl-cap: "Data-quality panel: pairing, milestone order and remote-end coverage (hub flights in the study period)"
+map(hd_all, \(h) ta_quality(h$legs, h$tm)) |> list_rbind() |> tbl_quality()
+```
+
+**Survivorship.** APDF contains operated flights. Cancellations, aircraft substitutions and broken rotations are not visible as such; a cancelled outbound flight makes the inbound arrival pair with a later departure, which typically falls into the long-turn or parked class. Severe days may therefore look milder in the turn statistics than they were for passengers.
+
+**What this dataset cannot establish.** The data contain milestones, not processes. They do not show ground-handling completion times (boarding, fuelling, cleaning, baggage), the time an aircraft was ready to depart, time held at the stand when ready, passenger or baggage connections, the true minimum feasible turnaround, or continuous stand occupancy where aircraft are towed. Actual ground time contains handling, planned waiting and imposed waiting together. Delay causes are limited to ATFM delay (§3.5).
+
 ## 3. Concept, Model and Methods
 
 ### 3.1 Milestone model
@@ -300,6 +311,24 @@ All delays are signed (negative = early) and in minutes. Local metrics use the h
 | Late carry | Share of flights ≥ 15 min late at the start of a link still ≥ 15 min late at its end |
 | Delay ratio | Positive delay minutes at the end of a link per positive delay minute at its start (> 1: link adds delay) |
 
+**Rotation accounting.** For a turn with both remote ends, the delay at the downstream arrival decomposes exactly into the delay at the upstream departure and the change on each stage:
+
+$$
+D_3 = D_0 + \underbrace{(D_1 - D_0)}_{\text{DDI-F upstream}} + \underbrace{(D_2 - D_1)}_{\text{DDI-G hub}} + \underbrace{(D_3 - D_2)}_{\text{DDI-F downstream}}
+$$
+
+The identity also holds for means, so the stages can be compared on one scale (§5.3). It is an accounting identity, not a causal attribution.
+
+**Available time after arrival.** The turnaround left to the aircraft after it actually arrives is
+
+$$
+T_V = \text{SOBT} - \text{AIBT} = \text{STT} - D_1
+$$
+
+which is negative if the aircraft arrives after its scheduled departure. Relative to the empirical minimum turn time, the available margin is $T_V - \text{MTT}$, and the departure-delay floor $\max(0, \text{MTT} - T_V)$ is the departure delay that remains even if the turn is completed in MTT. Departure delay above this floor is called *excess*. Both depend on the MTT reference and describe a scenario, not proof that an earlier departure was achievable.
+
+**Punctuality transitions.** On each link, the GANP punctuality state at its start and end define four outcomes: punctuality *maintained* (within ±15 at both), *restored* (late at start, not at end), *lost* (not late at start, late at end) and *late persists*. A matrix over delay bands (early, within ±15, 15–30, 30–60, ≥ 60 min) shows partial recovery that the binary states hide.
+
 **Local drivers (exploratory).** Turns are flagged for conditions that may explain delay at the hub. Each flag splits the turns into two groups; differences between the groups are descriptive, and the flags overlap.
 
 | Flag | Definition |
@@ -364,7 +393,44 @@ tbl_local(tm_all |> filter(TA_CLASS == "EUR-EUR"), by = "HUB")
 tbl_local(tm_all |> filter(TA_CLASS == "INTL-INTL"), by = "HUB")
 ```
 
+```{r cmp-margin}
+#| fig-cap: "Share of departures 15 min or more late by available margin after arrival (SOBT − AIBT − MTT), one line per hub; dashed: no margin left"
+#| fig-height: 4
+plot_margin(ch_all)
+```
+
+The curves have a common shape: once the available margin is exhausted (left of the dashed line), three quarters or more of departures are late at every hub. With ample margin they level off at hub-specific values, from about 10–15% (LTFM, EGLL) to more than 40% (LPPT) of EUR–EUR departures. This plateau is late departure that is not explained by a late inbound aircraft, and it separates the hubs more clearly than the average indicators.
+
+```{r cmp-floor}
+#| tbl-cap: "Departure delay split into the reference floor (delay that remains if the turn takes MTT) and the excess above it (turns, means)"
+tbl_floor(ch_all)
+```
+
+```{r cmp-transition}
+#| tbl-cap: "Punctuality transitions across the hub turn, EUR–EUR turns: from arrival (D1) to departure (D2)"
+ta_transition4(ch_all, class = "EUR-EUR") |> tbl_transition4()
+```
+
+```{r cmp-tail}
+#| tbl-cap: "Departure delay distribution and tail burden, EUR–EUR turns: share of positive departure delay minutes carried by the 5% and 10% most delayed turns"
+tbl_tail(ch_all)
+```
+
+At every hub, the 10% most delayed departures carry roughly a third to a half of all positive departure delay minutes. Means are therefore strongly influenced by a small share of turns, which is why medians and punctuality shares are reported alongside.
+
 ### 5.3 Propagation along the chain
+
+```{r cmp-waterfall}
+#| fig-cap: "Rotation accounting, EUR–EUR turns with both remote ends: mean delay at the upstream departure (D0), change on the upstream leg (DDI-F), hub turn (DDI-G) and downstream leg (DDI-F), and mean delay at the downstream arrival (D3)"
+#| fig-height: 5
+wf_all <- ta_waterfall(ch_all)
+plot_waterfall(wf_all)
+```
+
+```{r cmp-waterfall-tbl}
+#| tbl-cap: "Rotation accounting, EUR–EUR turns with both remote ends (means; the stages add up exactly)"
+tbl_waterfall(wf_all)
+```
 
 ```{r cmp-indicators}
 #| tbl-cap: "Established indicators per link, EUR–EUR turns (legs: remote end APDF). BTO/GTO in %, DDI-F/DDI-G/TDI mean in min (> 0: delay added)"
@@ -483,6 +549,9 @@ plot_weekday(map(hd_all, "daily") |> list_rbind())
 ### 5.8 Observations
 
 These results describe one summer and should be read with the coverage of chapter 2 in mind:
+
+- **Where delay is gained and lost (rotation accounting).** At every hub, both legs recover delay and the hub turn adds it. In the mean, the upstream leg recovers `r sprintf("%.0f–%.0f", -max(wf_all$DDI_F_UP), -min(wf_all$DDI_F_UP))` min, the hub turn adds `r sprintf("%.0f–%.0f", min(wf_all$DDI_G), max(wf_all$DDI_G))` min and the downstream leg recovers `r sprintf("%.0f–%.0f", -max(wf_all$DDI_F_DN), -min(wf_all$DDI_F_DN))` min. Whether the rotation ends later or earlier than it started depends on the balance of these stages.
+- **Available margin.** Once the margin after arrival is used up, most departures are late at all hubs alike. With ample margin, hubs differ in how many departures are still late; this plateau describes late departure that does not follow from a late inbound aircraft.
 
 - **Flight legs reduce delay.** Mean DDI-F is negative on both legs at every hub, and BTO is mostly around 15–30%, at or below CODA's 30–35% planning range. The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
 - **The hub turn adds delay.** GTO is about 70–80%: most turns take longer than scheduled, and mean DDI-G is positive at every hub (delay ratio `r rr("2 hub turn (D1->D2)")`). TDI, which neutralises early arrivals, is lower but positive at most hubs. Early or on-time arrivals still depart with a positive median delay, while slack in the turn absorbs part of large inbound delays.

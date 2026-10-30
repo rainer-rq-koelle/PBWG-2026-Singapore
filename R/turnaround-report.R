@@ -276,3 +276,98 @@ plot_weekday <- function(daily_all) {
     facet_wrap(~IND, scales = "free_y") +
     labs(x = NULL, y = "Median over days (one line per hub)")
 }
+
+# ---- rotation waterfall, available time, transitions, tails, data quality ---------------
+
+plot_waterfall <- function(wf) {
+  stages <- c("D0 upstream dep.", "DDI-F up", "DDI-G hub", "DDI-F down", "D3 downstream arr.")
+  d <- wf |>
+    transmute(HUB, s1 = D0, s2 = DDI_F_UP, s3 = DDI_G, s4 = DDI_F_DN) |>
+    pivot_longer(-HUB, names_to = "S", values_to = "V") |>
+    group_by(HUB) |>
+    mutate(END = cumsum(V), START = lag(END, default = 0),
+           STAGE = factor(stages[1:4][match(S, c("s1", "s2", "s3", "s4"))], levels = stages)) |>
+    ungroup()
+  tot <- wf |> transmute(HUB, STAGE = factor(stages[5], levels = stages), START = 0, END = D3)
+  d <- bind_rows(d, tot) |>
+    mutate(TYPE = case_when(STAGE %in% stages[c(1, 5)] ~ "delay level",
+                            END > START ~ "delay added", TRUE ~ "delay recovered"),
+           X = as.integer(STAGE))
+  ggplot(d) +
+    geom_rect(aes(xmin = X - 0.4, xmax = X + 0.4, ymin = START, ymax = END, fill = TYPE)) +
+    geom_hline(yintercept = 0, colour = "grey40") +
+    facet_wrap(~HUB, ncol = 5) +
+    scale_x_continuous(breaks = 1:5, labels = c("D0", "U", "H", "D", "D3")) +
+    scale_fill_manual(values = c("delay level" = "grey55", "delay added" = "#B2182B",
+                                 "delay recovered" = "#2166AC")) +
+    labs(x = "U = upstream leg, H = hub turn, D = downstream leg",
+         y = "Mean delay (min)", fill = NULL) +
+    theme(legend.position = "bottom")
+}
+
+tbl_waterfall <- function(wf) {
+  wf |>
+    gt_doc() |>
+    cols_label(HUB = "Hub", D0 = "D0 upstream dep.", DDI_F_UP = "DDI-F up", DDI_G = "DDI-G hub",
+               DDI_F_DN = "DDI-F down", D3 = "D3 downstream arr.") |>
+    fmt_integer(N) |> fmt_number(-c(HUB, N), decimals = 1) |>
+    tab_spanner("Mean (min); D0 + DDI-F up + DDI-G + DDI-F down = D3", c(D0, DDI_F_UP, DDI_G, DDI_F_DN, D3))
+}
+
+plot_margin <- function(ch) {
+  ggplot(ta_margin_curve(ch), aes(XB, DEP_LATE, group = HUB)) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_line(colour = "grey35", alpha = 0.8) +
+    facet_wrap(~TA_CLASS) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "Available margin after arrival: SOBT − AIBT − MTT (min, 5-min bins)",
+         y = "Departures 15 min or more late")
+}
+
+tbl_floor <- function(ch) {
+  ta_floor_split(ch) |>
+    gt_doc(groupname_col = "TA_CLASS") |>
+    cols_label(HUB = "Hub", D2_POS = "Dep. delay (pos.)", FLOOR = "Floor", FLOOR_SHARE = "Turns with floor > 0",
+               EXCESS_POS = "Excess (pos.)") |>
+    fmt_integer(N) |> fmt_number(c(D2_POS, FLOOR, EXCESS_POS), decimals = 1) |>
+    fmt_percent(FLOOR_SHARE, decimals = 0) |>
+    tab_spanner("Mean (min)", c(D2_POS, FLOOR, EXCESS_POS))
+}
+
+tbl_transition4 <- function(t4, first = "Hub") {
+  t4 |>
+    gt_doc() |>
+    cols_label(HUB = first, MAINTAINED = "Maintained", RESTORED = "Restored", LOST = "Lost",
+               PERSISTS = "Late persists") |>
+    fmt_integer(N) |> fmt_percent(-c(HUB, N), decimals = 0) |>
+    tab_spanner("Punctuality state (GANP ±15 min window)", c(MAINTAINED, RESTORED, LOST, PERSISTS))
+}
+
+plot_transition <- function(tr) {
+  ggplot(tr, aes(TO, FROM, fill = P)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = scales::percent(P, accuracy = 1)), size = 2.6) +
+    scale_fill_distiller(palette = "Greys", direction = 1, limits = c(0, 1), guide = "none") +
+    labs(x = "Departure delay D2 band", y = "Arrival delay D1 band") +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+}
+
+tbl_tail <- function(ch) {
+  ta_tail(ch) |>
+    gt_doc() |>
+    cols_label(HUB = "Hub", D2_P50 = "P50", D2_P90 = "P90", D2_P95 = "P95", D2_LATE = "Mean if late",
+               TOP5 = "Worst 5%", TOP10 = "Worst 10%") |>
+    fmt_integer(N) |> fmt_number(c(D2_P50, D2_P90, D2_P95, D2_LATE), decimals = 0) |>
+    fmt_percent(c(TOP5, TOP10), decimals = 0) |>
+    tab_spanner("Departure delay D2 (min)", c(D2_P50, D2_P90, D2_P95, D2_LATE)) |>
+    tab_spanner("Share of positive delay minutes", c(TOP5, TOP10))
+}
+
+tbl_quality <- function(q) {
+  q |>
+    gt_doc() |>
+    cols_label(HUB = "Hub", ARRIVALS = "Arrivals", NEXT_DEP = "Next movement is a departure",
+               ARR_CHRONO = "ALDT ≤ AIBT", DEP_CHRONO = "AOBT ≤ ATOT", TURN_CHRONO = "AIBT < AOBT",
+               SCHED_VALID = "STT > 0", REMOTE_EUR = "EUR remote end filled") |>
+    fmt_integer(ARRIVALS) |> fmt_percent(-c(HUB, ARRIVALS), decimals = 1)
+}

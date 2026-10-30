@@ -54,6 +54,13 @@ plot_delays(hd$tm)
 tbl_links(cl, "2 hub turn (D1->D2)")
 ```
 
+```{r}
+#| fig-cap: !expr cap("punctuality transitions across the hub turn; share of departure delay bands by arrival delay band (turns, rows add to 100%)")
+#| fig-height: 3.5
+#| fig-width: 6
+plot_transition(ta_transition(hd$ch))
+```
+
 #### Upstream: inbound leg
 
 ```{r}
