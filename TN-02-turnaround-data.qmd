@@ -571,7 +571,8 @@ These results describe one summer and should be read with the coverage of chapte
 | Column | Content |
 |---|---|
 | `UID` | Flight key `ADEP-ADES-<SAM_ID>` (APDS ID if no unique SAM_ID) |
-| `FLTID`, `REG`, `TYPE` | From hub APDF |
+| `FLTID` | Aircraft identification (ICAO Doc 4444), registration, or airport-provided FLTID. Here: the filed aircraft identification where the flight links uniquely to the flight plan (SAM_ID), otherwise the airport-provided value; the airport label remains traceable via `SOURCE_ID` |
+| `REG`, `TYPE` | From hub APDF |
 | `ICAO24` | From NM (`AIRCRAFT_ADDRESS`) via SAM_ID; blank if not linked |
 | `ADEP`, `ADES` | As reported by the hub APDF |
 | `MST` | `SOBT`, `AOBT`, `ATOT`, `ALDT`, `AIBT`, `SIBT` |

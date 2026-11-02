@@ -242,13 +242,16 @@ ta_build <- function(p, con = NULL) {
       by = c("SAM_ID", "LEG"), na_matches = "never"
     ) |>
     left_join(
-      nm |> select(SAM_ID = ID, ICAO24 = AIRCRAFT_ADDRESS, EOBT_1, ARVT_1, TAXI_TIME_1, FLT_DUR_1,
+      nm |> select(SAM_ID = ID, ICAO24 = AIRCRAFT_ADDRESS, AIRCRAFT_ID, EOBT_1, ARVT_1, TAXI_TIME_1, FLT_DUR_1,
                    AOBT_3, ARVT_3, TAXI_TIME_3, FLT_DUR_3, ATFM_DELAY, MOST_PEN_REG, REG_REASON,
                    IATA_DELAY_CODE, ICAO_FLT_TYPE, FLT_STATUS),
       by = "SAM_ID", na_matches = "never"
     ) |>
     mutate(
       ICAO24 = if_else(SAM_OK, toupper(ICAO24), NA_character_),
+      # FLTID: aircraft identification (ICAO Doc 4444) where SAM_ID links uniquely,
+      # otherwise the airport-provided value; the APDF label stays traceable via SOURCE_ID.
+      FLTID  = if_else(SAM_OK & !is.na(AIRCRAFT_ID) & AIRCRAFT_ID != "", AIRCRAFT_ID, FLTID),
       APDF_OK = SAM_OK & REMOTE_APDF & !is.na(R_SCH) & (!is.na(R_BLK) | !is.na(R_RWY_T)),
       NM_OK   = SAM_OK & !is.na(AOBT_3) & !is.na(ARVT_3) & !is.na(FLT_DUR_1) & !is.na(TAXI_TIME_1),
       REMOTE_SRC = case_when(
