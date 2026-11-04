@@ -38,3 +38,4 @@ Thumbs.db
 AGENTS.md
 data/*.csv
 !data/ref-airports-ARP.csv
+data/share/
