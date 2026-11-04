@@ -1,6 +1,7 @@
 # Build the analytic milestone datasets (layer 1) per region pair
 #
-# Sources : EUR APDF milestones, partner milestones, OSN/OPDI flight events
+# Sources : EUR APDF milestones (R/prep-apdf-extract.R), partner milestones (if any),
+#           OSN/OPDI flight events
 # Output  : data/EUR-<XXX>-milestone-EUR<XXX>OSN-20250601-20250614.csv
 #           data/EUR-<XXX>-flights-EUR<XXX>OSN-20250601-20250614.csv (linkage table)
 
@@ -11,7 +12,9 @@ flight_events <- open_dataset("data/flight_events/opdi_flight_events/")
 
 build_region_pair <- function(region, partner_file, prm) {
   apdf_ms <- read_milestones(sprintf("data/EUR-%s-milestone-test-20250601-20250614.csv", region))
-  ref_ms <- bind_rows(apdf_ms, read_milestones(partner_file))
+  # Region pairs without partner data yet: APDF + OSN only
+  partner_ms <- if (is.null(partner_file)) NULL else read_milestones(partner_file)
+  ref_ms <- bind_rows(apdf_ms, partner_ms)
 
   # Scope: airport pairs of the EUR APDF extract are authoritative
   flights <- ref_ms |>
@@ -45,7 +48,20 @@ region_pairs <- list(
   CHN = list(
     partner_file = "data/CHN-EUR-milestone-CHN-20250529-20250617.csv",
     prm = bridge_params(min_block_h = 6, max_block_h = 16)
-  )
+  ),
+  ZAF = list(
+    partner_file = NULL,
+    prm = bridge_params(min_block_h = 7, max_block_h = 14)
+  ),
+  # APDF + OSN only (partner data pending). Block windows cover the scheduled
+  # range Europe <-> region with margin.
+  USA = list(partner_file = NULL, prm = bridge_params(min_block_h = 6, max_block_h = 14)),
+  CAN = list(partner_file = NULL, prm = bridge_params(min_block_h = 6, max_block_h = 13)),
+  JPN = list(partner_file = NULL, prm = bridge_params(min_block_h = 10, max_block_h = 18)),
+  THA = list(partner_file = NULL, prm = bridge_params(min_block_h = 9, max_block_h = 15)),
+  SIN = list(partner_file = NULL, prm = bridge_params(min_block_h = 10, max_block_h = 16))
 )
 
-results <- imap(region_pairs, \(x, region) build_region_pair(region, x$partner_file, x$prm))
+# Build selected region pairs, e.g. region_sel <- c("USA", "CAN"); default: all
+region_sel <- if (exists("region_sel")) region_sel else names(region_pairs)
+results <- imap(region_pairs[region_sel], \(x, region) build_region_pair(region, x$partner_file, x$prm))
