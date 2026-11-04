@@ -112,7 +112,7 @@ readme_text <- function(r, flights, ms, cov) {
     "## Notes for use",
     "",
     "- OSN is a volunteer ADS-B receiver network: coverage near some airports and on the ground is limited, and timestamps are not ATC grade. The coverage file shows what is observed at each end.",
-    "- European ring crossings (D40/D100, A100/A40) are derived from the NM trajectory and are therefore modelled values.",
+    "- European ring crossings (D40/D100, A100/A40) are derived from the NM trajectory and may differ from some of the OSN derived measured position reports.",
     "- This is an analytic dataset (layer 1). Metric-specific selection (e.g. which of several 40 NM crossings to use for ASMA) is a later step.",
     "",
     "## Feedback",
