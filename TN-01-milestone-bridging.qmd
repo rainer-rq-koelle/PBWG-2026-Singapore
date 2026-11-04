@@ -574,7 +574,103 @@ bind_rows(summarise_region(bra, "EUR–BRA"), summarise_region(chn, "EUR–CHN")
 -   **OSN data quality.** OSN `AOBT`/`AIBT` events can be assigned to the wrong stand visit (e.g. an `AIBT` shortly after take-off). This is left to the payload layer.
 -   **Source differences.** APDF airborne milestones partly derive from the NM trajectory (a model). OSN is non-ATC-grade ADS-B with occasional time-synchronisation issues. Neither is a reference truth.
 
-## 7. Worked Example: Vertical Flight Efficiency (Exploratory)
+## 7. International Flights between PBWG Regions (OSN only)
+
+The approach also applies to flights between two PBWG regions that do not depend on Europe, e.g. Japan–United States. For these, neither a European record nor (so far) partner data are available, so the flights are reconstructed from OSN alone. The result is a baseline that both partners of a pair can complete with their own data.
+
+```{r intl-setup}
+intl_tag <- "20250601-20250613"
+pbwg_apts <- read_csv(here("data", "ref-pbwg-airports.csv"), show_col_types = FALSE)
+intl_pairs <- read_csv(here("data", "intl", sprintf("INTL-pairs-summary-%s.csv", intl_tag)), show_col_types = FALSE)
+intl_excl <- read_csv(here("data", "intl", sprintf("INTL-chain-exclusions-%s.csv", intl_tag)), show_col_types = FALSE)
+read_intl <- function(pair, what) {
+  read_csv(here("data", "intl", sprintf("%s-%s-OSN-%s.csv", pair, what, intl_tag)), show_col_types = FALSE)
+}
+```
+
+### 7.1 Scope
+
+-   **Airports:** the PBWG partner airports used for the European region pairs, plus the three South African airports (`r nrow(pbwg_apts)` airports in 8 regions).
+-   **Pairs:** all `r nrow(intl_pairs)` combinations of two non-European regions. Each pair is reported once (alphabetical order, e.g. `JPN-USA`), covering both directions.
+-   **Period:** 1–13 June 2025 (the OSN flight event extract ends on 13 June), by first OSN observation at the departure airport.
+
+### 7.2 Method
+
+Without a reference record at either end, the flight must be identified from OSN itself. OSN splits long flights into segments at surveillance gaps, and usually only the first segment carries the departure airport and the last the destination (section 2.2). Flights are therefore reconstructed per aircraft (ICAO24) by chaining its OSN segments in time:
+
+1.  **Start** at a segment departing from a PBWG airport.
+2.  **Follow** the aircraft to its next landing, i.e. the first later segment with a destination airport. Intermediate segments without departure or destination (typically oceanic pieces) are part of the flight.
+3.  **Keep** the flight if it lands at a PBWG airport of another region.
+
+Chains are **excluded** if they are not plausible as one flight:
+
+-   **Intermediate take-off:** a segment departing an airport occurs before the landing, i.e. OSN missed a landing in between.
+-   **Duration does not fit the distance:** the time from first to last observation must lie between $d/600 + 0.2$ h and $d/330 + 1.5$ h (at most 20 h), with $d$ the great-circle distance in NM. The bounds are derived from the European long-haul flights (effective speeds of 357–499 kt between take-off and landing). The upper bound removes chains through a hub where OSN missed the intermediate landing (e.g. via a Gulf hub).
+-   **Callsign change on a long chain:** the flight number changes between the first and last segment and the duration is close to the upper bound (likely two flights).
+
+The milestone table is then built from all OSN events of the chained segments, with the same codes and conventions as for the European region pairs (section 1.1). `MATCH` is `icao24+chain+fltid` where the segment's callsign equals the flight's callsign, otherwise `icao24+chain`.
+
+```{r intl-exclusions}
+intl_excl |>
+  count(EXCLUDE, name = "Chains") |>
+  arrange(desc(Chains)) |>
+  gt() |>
+  cols_label(EXCLUDE = "Exclusion reason")
+```
+
+### 7.3 Pair summary
+
+```{r intl-pairs}
+intl_pairs |>
+  select(PAIR, FLIGHTS, AIRPORT_PAIRS, SEG_MEDIAN, SEG_WITHOUT_ADEP_ADES, CALLSIGN_CONSISTENT, DUR_H_MEDIAN, CHAINS_EXCLUDED) |>
+  gt() |>
+  fmt_integer(c(FLIGHTS, SEG_WITHOUT_ADEP_ADES, CHAINS_EXCLUDED)) |>
+  fmt_percent(CALLSIGN_CONSISTENT, decimals = 0) |>
+  sub_missing(missing_text = "–") |>
+  cols_label(
+    PAIR = "Region pair", FLIGHTS = "Flights", AIRPORT_PAIRS = "Airport pairs",
+    SEG_MEDIAN = "OSN segments (median)", SEG_WITHOUT_ADEP_ADES = "Segments without ADEP/ADES",
+    CALLSIGN_CONSISTENT = "Callsign consistent", DUR_H_MEDIAN = "Duration (h, median)",
+    CHAINS_EXCLUDED = "Chains excluded"
+  )
+```
+
+-   **`r sum(intl_pairs$FLIGHTS > 0)` of `r nrow(intl_pairs)` pairs** are observed. The pairs without flights mostly have no direct service between the PBWG airports in this period.
+-   **Short-haul pairs** (CAN–USA, SIN–THA) are mostly observed as a single OSN segment. **Long-haul pairs** consist of 2–4 segments, with many intermediate segments without departure or destination. The time-ordered chaining is what links these.
+-   **Callsigns** are consistent over the chained segments for practically all flights. The exception is USA–ZAF (72%), where the differences are garbled ADS-B callsigns within one flight (e.g. `UAL188`/`UQL188`), not two flights.
+-   **Exclusions** are frequent for the Asian regional pairs (CHN–THA, CHN–SIN, SIN–THA), mainly intermediate take-offs in dense regional traffic. The chaining is deliberately conservative: a flight is excluded rather than risk merging two.
+
+### 7.4 Example: DAL294 RJTT → KATL (9 June 2025)
+
+```{r intl-example}
+ju_fl <- read_intl("JPN-USA", "flights")
+ju_ms <- read_intl("JPN-USA", "milestones") |> mutate(TIME = as.POSIXct(TIME, tz = "UTC"))
+ex_intl <- "RJTT-KATL-A69822-202506090628"
+
+ju_fl |>
+  filter(UID == ex_intl) |>
+  select(FLTID, ADEP, ADES, T_FIRST_SEEN, T_LAST_SEEN, DUR_H, GCD_NM, N_SEG, N_SEG_NO_ADEP_ADES, MAX_GAP_MIN) |>
+  gt() |>
+  fmt_datetime(c(T_FIRST_SEEN, T_LAST_SEEN), format = "%Y-%m-%d %H:%M")
+
+ju_ms |>
+  filter(UID == ex_intl, !str_detect(MST, hide_mst)) |>
+  select(TIME, MST, MST_LBL, SOURCE_ID) |>
+  gt(groupname_col = "SOURCE_ID") |>
+  fmt_datetime(TIME, format = "%Y-%m-%d %H:%M:%S") |>
+  tab_style(cell_text(weight = "bold"), cells_body(rows = MST %in% core_mst)) |>
+  sub_missing(missing_text = "")
+```
+
+The Delta flight from Tokyo Haneda to Atlanta is observed in three OSN segments over 15 hours:
+
+-   **Departure at RJTT:** take-off on runway 16L, D40 and D100, and TOC.
+-   **Mid-Pacific:** a short segment without departure or destination.
+-   **Arrival at KATL:** TOD, A100, A40 and the landing on runway 08L.
+
+The two gaps (up to `r ju_fl$MAX_GAP_MIN[ju_fl$UID == ex_intl]` min) lie over the Pacific. The `AOBT`/`AIBT` events are OSN block events that are not reliable here: the `AIBT` a few minutes after take-off at RJTT and the `AOBT` in the third segment are artefacts of the stand detection (section 6), which the payload layer has to filter. Block and schedule times from Japan and the United States would complete the flight from AOBT to AIBT.
+
+## 8. Worked Example: Vertical Flight Efficiency (Exploratory)
 
 This chapter uses the OSN level segments to explore vertical flight efficiency (VFE) around one major airport per PBWG region. It tests whether the milestone approach supports the VFE study and shows where the open data are dense or sparse. The band breakdown is exploratory and for discussion in the group.
 
@@ -595,7 +691,7 @@ vfe_segs <- map(vfe_apts, \(a) read_csv(vfe_file(paste0(a, "-segments")), show_c
 apt_levels <- unname(vfe_apts)
 ```
 
-### 7.1 Definitions
+### 8.1 Definitions
 
 -   **Flights.** All OSN flights departing from (DEP) or arriving at (ARR) the airport, 1–13 June 2025, based on the OSN flight list's ADEP/ADES. The flight event extract ends on 13 June. Flights with ADEP = ADES and OSN records without any airborne event (tow and service vehicles, taxi-only records) are excluded.
 -   **Level segment.** An OSN `LVL_START` followed by its `LVL_END` twin within the same OSN flight segment. Unpaired events are counted as a data-quality item.
@@ -603,7 +699,7 @@ apt_levels <- unname(vfe_apts)
 -   **Band.** Distance of the level-off start from the airport reference point (ARP, OurAirports), in NM: 200–150, 150–120, 120–100, 100–60, 60–40, 40–20, 20–0. A level-off crossing a band boundary is assigned to the band where it starts.
 -   **Level time / distance.** Duration and ground distance between `LVL_START` and `LVL_END`.
 
-### 7.2 Cohorts: what OSN observes
+### 8.2 Cohorts: what OSN observes
 
 A flight without a level-off may have flown a continuous climb or descent, or OSN may simply not have observed it. Flights are therefore grouped by the closest point to the airport at which OSN observes them. The airport's own runway time counts as 0 NM.
 
@@ -636,7 +732,7 @@ For most airports, OSN observes 90% or more of flights down to 20 NM. The except
 
 Cohort A is used for the VFE figures below.
 
-### 7.3 Spatial coverage
+### 8.3 Spatial coverage
 
 The maps show the positions of all level-offs within 200 NM (left) and of TOC for departures and TOD for arrivals (right). The rings mark the band limits. Empty sectors can be due to traffic flows, airspace structure or blocked receiver coverage. Separating these effects needs local knowledge.
 
@@ -669,7 +765,7 @@ vfe_tt |>
   cols_label(DIR = "Direction", flights = "Flights", p25 = "P25 (NM)", median = "Median (NM)", p75 = "P75 (NM)", beyond_200 = "> 200 NM")
 ```
 
-### 7.4 Level-offs by band
+### 8.4 Level-offs by band
 
 For each band:
 
@@ -724,7 +820,7 @@ vfe_band |>
   labs(x = "Share of observed flights with a level-off starting in the band", y = "Band (NM)")
 ```
 
-### 7.5 Roll-up per airport
+### 8.5 Roll-up per airport
 
 VFE indicators per airport and direction, for flights in cohort A within 200 NM:
 
@@ -748,7 +844,7 @@ vfe_roll |>
   )
 ```
 
-### 7.6 Observations
+### 8.6 Observations
 
 -   **Arrivals level off more than departures** at every airport, in line with earlier VFE work. Level time per arrival is highest at KATL, RJAA and EGLL, at about 4–6 min per flight. Departures typically level off for less than 1.5 min per flight.
 
@@ -777,7 +873,7 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
   cols_label(ISSUE = "Item (share of events or flights)")
 ```
 
-## 8. Next Steps
+## 9. Next Steps
 
 -   [ ] Review one-sided flights and the OSN links with `MATCH = icao24+window`
 -   [ ] Add D200/A200 crossings to the OPDI flight events (OSN data engineering)
@@ -787,6 +883,7 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 -   [ ] South Africa: integrate partner data for FAOR, FACT, FALE once available
 -   [x] Build APDF + OSN datasets for the remaining region pairs (USA, CAN, SIN, JPN, THA)
 -   [ ] Add the APDF + OSN region pairs to the data characterisation (chapter 5)
+-   [ ] International pairs: add partner data at both ends as they become available; review the excluded chains of the Asian regional pairs
 -   [ ] Define payload rules per metric (taxi-out/in, ASMA/DSMA, VFE)
 -   [ ] VFE: discuss band breakdown and cohort definition in the group; add supplementary measures (e.g. level segment duration distribution, level altitudes)
 -   [ ] VFE: follow up the OSN data-engineering items with the OPDI data engineer
@@ -801,10 +898,14 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 | `R/analytic_merge.R` | Linkage and merge functions |
 | `R/build-analytic.R` | Builds the analytic datasets for all region pairs |
 | `R/vfe.R`, `R/build-vfe.R` | VFE functions and build script |
+| `R/international.R`, `R/build-international.R` | International region pairs (OSN only): chaining, pair datasets, packages |
+| `R/build-share-packages.R` | Partner data packages for the European region pairs |
 | `data/ref-airports-ARP.csv` | Airport reference points (OurAirports) |
+| `data/ref-pbwg-airports.csv` | PBWG partner airports with reference points (OurAirports) |
 | `data/EUR-<XXX>-milestone-EUR<XXX>OSN-20250601-20250614.csv` | Analytic milestone dataset (PBWG milestone-table format plus `UID` and `MATCH`) |
 | `data/EUR-<XXX>-flights-EUR<XXX>OSN-20250601-20250614.csv` | One row per flight: reference record ids, anchors, link type, number of OSN segments |
 | `data/vfe/` | VFE level segments, cohorts, band tables, roll-up, TOC/TOD and data-engineering items |
+| `data/intl/` | International pair datasets, pair summary, chain exclusions |
 
 ------------------------------------------------------------------------
 
@@ -815,3 +916,4 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 -   2026-10-28: China partner sample added; examples CCA937/CCA938; data characterisation for both region pairs
 -   2026-10-28: Exploratory VFE worked example for eight PBWG reference airports
 -   2026-11-04: EUR–ZAF (APDF + OSN) added; FLTID convention (ICAO Doc 4444 aircraft identification)
+-   2026-11-04: International flights between PBWG regions (OSN only), chapter 7
