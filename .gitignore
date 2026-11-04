@@ -39,3 +39,5 @@ AGENTS.md
 data/*.csv
 !data/ref-airports-ARP.csv
 data/share/
+data/intl/
+!data/ref-pbwg-airports.csv
