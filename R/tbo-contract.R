@@ -26,11 +26,17 @@ act_obs_class <- function(src) {
             .default = "missing")
 }
 
-# mst_cmp: compare_milestones() output (ID, MST, SOURCE, TIME_M1/M3, LAT_*, LON_*, FL_*)
+# mst_cmp: compare_milestones() output (ID, MST, SOURCE, TIME_<ref>/TIME_M3, LAT_*, LON_*, FL_*)
+#          (wide, one column set per model; pass the wide table from milestones_wide() for M2)
 # intl:    intl_ring_actuals()$actual (ID, MST, TIME, OBS) – overrides ACT at INTL rings
 # flights: ID, AIRCRAFT_ID, ADEP, ADES, plus intl codes vector
-contract_table <- function(mst_cmp, flights, intl_codes, intl = NULL) {
+# ref:     reference model ("M1" filed, "M2" regulated)
+contract_table <- function(mst_cmp, flights, intl_codes, intl = NULL, ref = "M1") {
+  rc <- \(v) paste0(v, "_", ref)
   ct <- mst_cmp |>
+    filter(!is.na(.data[[rc("TIME")]]) | !is.na(TIME_M3)) |>
+    mutate(DPOS_NM = geosphere::distHaversine(cbind(.data[[rc("LON")]], .data[[rc("LAT")]]), cbind(LON_M3, LAT_M3)) / 1852,
+           DFL = FL_M3 - .data[[rc("FL")]]) |>
     left_join(select(flights, ID, FLTID = AIRCRAFT_ID, ADEP, ADES), by = "ID") |>
     mutate(
       MST_CLASS = case_when(SOURCE == "fir" ~ "fir", MST %in% c("TOC", "TOD") ~ "vertical", .default = "ring"),
@@ -43,12 +49,13 @@ contract_table <- function(mst_cmp, flights, intl_codes, intl = NULL) {
         .default = "ENR"),
       REGION_PAIR = paste(if_else(ADEP %in% intl_codes, "INTL", "EUR"),
                           if_else(ADES %in% intl_codes, "INTL", "EUR"), sep = "-"),
-      REF_MODEL = "M1",
+      REF_MODEL = ref,
       ACT_SRC = if_else(is.na(TIME_M3), NA_character_, "NM-M3"),
-      # M3 identical to M1 outside the NM area = time-shifted plan, not an observation
+      # M3 identical to the reference outside the NM area = time-shifted plan, not an observation
       ACT_SRC = if_else(SIDE == "INTL" & !is.na(DPOS_NM) & DPOS_NM < 0.1 & abs(DFL) < 1, "NM-M3-EXTRAP", ACT_SRC)) |>
     transmute(UID = ID, FLTID, ADEP, ADES, REGION_PAIR, MST, MST_CLASS, SIDE, REF_MODEL,
-              REF_TIME = TIME_M1, REF_LAT = LAT_M1, REF_LON = LON_M1, REF_FL = FL_M1,
+              REF_TIME = .data[[rc("TIME")]], REF_LAT = .data[[rc("LAT")]], REF_LON = .data[[rc("LON")]],
+              REF_FL = .data[[rc("FL")]],
               ACT_TIME = TIME_M3, ACT_LAT = LAT_M3, ACT_LON = LON_M3, ACT_FL = FL_M3, ACT_SRC)
 
   if (!is.null(intl)) {
@@ -76,7 +83,7 @@ contract_table <- function(mst_cmp, flights, intl_codes, intl = NULL) {
       DFL     = if_else(STATUS == "delivered", ACT_FL - REF_FL, NA_real_),
       DPOS_NM = if_else(STATUS == "delivered",
                         geosphere::distHaversine(cbind(REF_LON, REF_LAT), cbind(ACT_LON, ACT_LAT)) / 1852, NA_real_)) |>
-    group_by(UID) |>
+    group_by(UID, REF_MODEL) |>
     arrange(coalesce(REF_TIME, ACT_TIME), .by_group = TRUE) |>
     mutate(SEQ = row_number(), PREV_DT = lag(DT_MIN)) |>
     fill(PREV_DT, .direction = "down") |>
@@ -86,10 +93,42 @@ contract_table <- function(mst_cmp, flights, intl_codes, intl = NULL) {
     relocate(SEQ, .after = REGION_PAIR)
 }
 
-# Flight-level delivery summary (one row per flight)
+# Wide milestone table (one column set per model) from a long milestone table (MODEL M1/M2/M3)
+milestones_wide <- function(mst) {
+  mst |>
+    pivot_wider(id_cols = c(ID, MST, SOURCE), names_from = MODEL, values_from = c(TIME, LAT, LON, FL))
+}
+
+# Canonical table with all available references stacked (REF_MODEL = M1 for all flights, + M2 where it exists)
+# reroute: optional tibble(ID, REROUTE) from reroute_flags(), carried as a flight attribute
+contract_table_multi <- function(mst, flights, intl_codes, intl = NULL, refs = c("M1", "M2"), reroute = NULL) {
+  w <- milestones_wide(mst)
+  out <- map(refs, \(r) {
+    if (!paste0("TIME_", r) %in% names(w)) return(NULL)
+    has_ref <- mst |> filter(MODEL == r) |> distinct(ID)
+    contract_table(semi_join(w, has_ref, by = "ID"), flights, intl_codes, intl, ref = r)
+  }) |> list_rbind()
+  regulated <- mst |> filter(MODEL == "M2") |> distinct(UID = ID) |> mutate(REGULATED = TRUE)
+  out <- out |> left_join(regulated, by = "UID") |> mutate(REGULATED = coalesce(REGULATED, FALSE))
+  if (!is.null(reroute)) out <- out |> left_join(rename(reroute, UID = ID), by = "UID")
+  out
+}
+
+# Side-by-side delivery summary per milestone: reference M1 vs M2
+contract_compare_refs <- function(ct, by = c("MST")) {
+  ct |>
+    filter(STATUS == "delivered") |>
+    group_by(across(all_of(by)), REF_MODEL) |>
+    summarise(n = n(), DT_MED = median(DT_MIN), DT_IQR = IQR(DT_MIN),
+              DPOS_MED = median(DPOS_NM, na.rm = TRUE), DPOS_P90 = quantile(DPOS_NM, .9, na.rm = TRUE),
+              .groups = "drop") |>
+    pivot_wider(names_from = REF_MODEL, values_from = c(n, DT_MED, DT_IQR, DPOS_MED, DPOS_P90))
+}
+
+# Flight-level delivery summary (one row per flight and reference)
 contract_summary <- function(ct) {
   ct |>
-    group_by(UID, FLTID, ADEP, ADES, REGION_PAIR) |>
+    group_by(UID, FLTID, ADEP, ADES, REGION_PAIR, REF_MODEL) |>
     summarise(
       N_POINTS = n(),
       DELIVERED = sum(STATUS == "delivered"),
