@@ -293,6 +293,28 @@ Strategy
 - Decision: OSN/OPDI flight-list ring crossings (C40/C100, both ends) are the primary "actual" at the INTL end;
   NM CPF (with guard) fills SBGR/ZBAA; M3 outside the NM area = extrapolated. Outer international ring = 100 NM.
 
+## Canonical contract table (2026-11-05)
+
+`R/tbo-contract.R` -> `contract_table()`, `contract_summary()`. One row per flight × contract point:
+- identity: UID, FLTID, ADEP, ADES, REGION_PAIR;
+- point: SEQ, MST, MST_CLASS (ring | vertical | fir), SIDE (EUR | ENR | INTL);
+- reference: REF_MODEL (M1, later M2), REF_TIME/LAT/LON/FL;
+- actual: ACT_TIME/LAT/LON/FL, ACT_SRC (NM-M3 | NM-CPF | OSN | PARTNER | NM-M3-EXTRAP | PROXY),
+  ACT_OBS (observed | extrapolated | proxy | missing);
+- outcome: STATUS (delivered | planned-only | actual-only | not-observed), DT_MIN, DFL, DPOS_NM;
+- DDT_MIN: change in DT since the previous delivered point, i.e. the segment gain or loss.
+
+Rules:
+- Ring sources (OSN, CPF) give a time only, so the position and FL of those points are left empty.
+- M3 identical to M1 on the INTL side (rings and FIR crossings into non-EUR regions) is extrapolated, so the
+  point is not-observed.
+- Partners contribute by filling ACT_* for their points (ACT_SRC = PARTNER-<ISO3>); not-observed -> delivered.
+
+Week 1 international flights (1,532 flights, 32.6k points), `data/tbo/TBO-contract-INTL-20250601-20250607.parquet`:
+- 7,388 of 10,341 non-EUR FIR crossings are not observed. That is the measurable gap partners can close.
+- Share of observed points per flight: EUR->INTL 0.52–0.69, INTL->EUR 0.64–0.89.
+- At least one observed INTL ring: ≥ 96% for most airports; ZBAA arrivals 45%, SBGR arrivals 76%.
+
 ## Open points
 
 - Whether RTFM is available through `point_profiles_tidy()`; how the regulated flag and CTOT are sourced.
