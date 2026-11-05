@@ -1,0 +1,950 @@
+---
+title: "Technical Note 03: Towards Trajectory-Based Operations"
+subtitle: "PBWG 2026 Singapore – reference-anchored comparison of planned and flown trajectories (draft)"
+author: "Performance Review Unit"
+date: today
+bibliography: references.bib
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    embed-resources: true
+    fig-width: 8
+    fig-height: 4.5
+  pdf:
+    documentclass: scrartcl
+    papersize: a4
+    geometry: [margin=2cm]
+    fontsize: 10pt
+    mainfont: Calibri
+    monofont: Consolas
+    toc: true
+    toc-depth: 2
+    colorlinks: true
+    fig-width: 7
+    fig-height: 4
+    fig-pos: "H"
+    echo: false
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(gt)
+library(here)
+
+source(here("R", "tbo-conformance.R"))
+source(here("R", "tbo-synthetic.R"))
+source(here("R", "tbo-synthetic-plots.R"))
+source(here("R", "tbo-report.R"))
+
+res <- run_cases()
+mst <- mst_cases()
+summ <- res |> select(case, summ) |> unnest(summ)
+
+# Operational data (European and international chapters); local only, not distributed with the note
+has_ops <- tbo_has_data()
+if (has_ops) d <- tbo_load()
+f1 <- function(x) sprintf("%.1f", x)
+gt_tn <- function(x, ...) gt(x, ...) |> fmt_number(where(is.double), decimals = 1) |>
+  tab_options(table.font.size = px(12))
+```
+
+## Introduction {#sec-intro}
+
+Trajectory-based operations (TBO) change what an operational performance framework has to observe.
+Under TBO, each flight is managed against a trajectory that has been shared among, and agreed by, the
+airspace user, the air navigation service providers along the route and the airports. Performance is
+then no longer only a question of how efficient or punctual a flight was. It is also a question of
+whether the agreed trajectory was delivered, how well its future course could be known in advance,
+how often and how late it had to be changed, and what those changes meant operationally.
+
+The current operational performance indicators of the ICAO Global Air Navigation Plan (GANP) were not
+designed for this. Punctuality measures the end points of a flight; flight-efficiency indicators compare
+the flown trajectory with a geometric reference such as the great-circle distance. Neither compares the
+flight with what was agreed for it. ICAO working papers have identified this gap explicitly and called
+for TBO-specific, airspace-user-oriented performance measures [@icao2022wp131]. Demonstration
+activities, such as the Asia-Pacific TBO Pathfinder project, are developing quantitative benefit
+metrics, but no validated common set of measures is yet available [@icao2025apactbo].
+
+This technical note proposes and tests a trajectory-analytic approach to that question. It compares a
+**reference trajectory**, standing in for the agreed trajectory, with the **flown trajectory**, and
+reports the differences at three levels:
+
+- **Milestones**: time, position and level offsets at operationally defined events, from departure
+  through boundary crossings to arrival.
+- **Continuous deviation**: lateral, along-track (time) and vertical offsets between the milestones.
+- **Simple signatures** that scale to global data: the sequence of flight information regions (FIRs)
+  traversed, the time offsets at FIR entries, and the difference in distance flown.
+
+The framing is **trajectory-contract delivery** rather than trajectory deviation. A flight can adhere
+closely to an inefficient agreement, and a deviation, such as an authorised shortcut, can improve the
+outcome. Adherence and efficiency are therefore measured separately, and every deviation keeps its sign.
+
+The note is written for an international working group. The method is generic: it needs a reference
+trajectory with planned times and levels, and an observed trajectory. It is developed and tested on
+synthetic trajectories with known answers, and then demonstrated on European data, where both the filed
+and the flown trajectories are available for every flight.[^eur-data] The European demonstration is a
+development set, not a template: other regions will hold different reference trajectories, and the
+method is designed to label which reference was used rather than to assume one.
+
+[^eur-data]: In the European network, the Network Manager stores up to three trajectory versions per
+flight: the last filed flight plan (Model 1), the plan updated after an air traffic flow management
+(ATFM) regulation (Model 2, regulated flights only), and the flown trajectory updated with surveillance
+and other operational data (Model 3). The demonstration in this note uses these versions.
+
+The note is organised as follows. @sec-background summarises what the literature and existing
+performance frameworks offer for measuring TBO delivery. @sec-method describes the method.
+@sec-synthetic introduces the principles and measures on synthetic cases with known answers, including a
+test of an established vertical flight-efficiency indicator. @sec-eur applies them to European city pairs,
+where the filed, regulated and flown trajectories are all available. @sec-intl extends the approach to
+connections between European hubs and partner airports in other regions, where the observation of the
+actual flight depends on the data each region can contribute. @sec-conclusions summarises the findings
+and proposes next steps for the PBWG.
+
+## Background: measuring TBO delivery {#sec-background}
+
+### What is being measured
+
+Measuring TBO performance involves at least four distinct objects, which a single trajectory-distance
+score cannot capture:
+
+| Object | Question | Example measures |
+|---|---|---|
+| Agreement delivery | Did the flight satisfy the applicable trajectory and its constraints? | time offset at milestones, tolerance compliance, lateral and vertical offsets |
+| Predictability | How accurately could the flight's future passage be known at a given decision time? | prediction error by look-ahead horizon, jumps in estimated times |
+| Stability | How much did the agreement change before execution, and how late? | number, size and lead time of revisions |
+| Operational consequence | What did the differences cost or save? | fuel, time, resource occupancy |
+
+These objects can conflict. Frequent renegotiation can produce excellent adherence to the latest
+agreement while delivering poor predictability against earlier commitments. Monitoring therefore needs
+both a **fixed baseline**, frozen at a declared milestone, and the **applicable agreement** in force
+when each part of the flight was executed.
+
+### Which trajectory is the reference?
+
+"Planned and agreed" covers several different objects, which answer different questions:
+
+- the **preferred** trajectory of the airspace user;
+- the **filed** flight plan, or a system reconstruction of it;
+- the **agreed** trajectory, with evidence of acceptance and an effective period;
+- a **predicted** trajectory issued by a named system at a recorded time;
+- the **executed** trajectory, observed by surveillance.
+
+A filed or predicted trajectory should not be promoted to "agreed" because it is the best available
+record. The NASA Management by Trajectory concept, for instance, distinguishes assigned trajectory
+constraints from trajectory descriptions, aircraft intent and predictions [@fernandes2018]. An aircraft
+can change its intent while remaining within its assigned constraints. Retrospective studies have used
+the last filed plan as a proxy for the agreed trajectory, while stating the limitation explicitly
+[@prats2019]. This note follows the same practice and labels every result with the reference used.
+
+### How trajectories are aligned
+
+Comparing two trajectories requires a rule for which points correspond. Three rules answer different
+questions:
+
+- **Same clock time**: where was the aircraft relative to its agreed position at that instant? This
+  combines spatial and timing differences.
+- **Same progress along the route**: how did the flown geometry and vertical profile differ,
+  independently of timing?
+- **Same operational event**: when and how did the aircraft cross a fix, a boundary, the top of
+  descent or an arrival constraint?
+
+These views are complementary. Shape-matching methods such as dynamic time warping can help compare
+geometry, but they remove precisely the timing offsets that TBO monitoring must expose. Comparative
+studies outside aviation also show that rankings of trajectories depend on the chosen similarity
+measure [@tao2021]. Generic similarity indices are therefore not used as primary measures here.
+
+### Existing measures and their evidence
+
+@tbl-evidence summarises the methods most directly reusable for TBO delivery, with the level of evidence
+behind each. The distinction matters: several indicators frequently cited in TBO discussions were
+proposed but never implemented.
+
+| Measure | Source | Evidence level | Use in this note |
+|---|---|---|---|
+| Timing error at critical points (variance of actual minus planned time) | APACHE project [@apache2018] | proposed, not implemented | time offset at milestones, drift |
+| Planned–actual passage-time differences in a TBO framework | @ruiz2018 | simulation | time offset at milestones |
+| Signed planned–actual route-length difference; deviation hotspots on route-point pairs | @bongiorno2017 | demonstrated on recorded traffic | distance difference; FIR sequence |
+| Track mapping to published routes; progress-based predictability | @andreevamori2024 | demonstrated on recorded traffic | lateral offset, progress mapping |
+| Distance-based flight efficiency against filed and actual trajectories | horizontal flight efficiency [@ectrl-hfe] | operational | precedent for distance accounting |
+| Flown versus filed flight level with a tolerance band | vertical en-route indicator [@ectrl-vfe-rp4]^[The indicator is used in the European Single Sky performance scheme, reference period 4 (RP4). It is referred to as the RP4 indicator in this note.] | operational | level offset; tested in @sec-synthetic |
+| Revisions per flight from tolerance inconsistency; aggregate revision burden | APACHE project [@apache2018] | proposed, not implemented | revision–execution split |
+| Tolerance windows at a controlled time of arrival under wind uncertainty | @tan2022 | analytical / model | outlook: tolerance windows |
+| Estimated-time-of-arrival error by look-ahead time; jumps and creep in predictions | @enea2013 | demonstrated on recorded traffic | outlook: needs archived predictions |
+| Fuel decomposition into planning and execution components | @prats2019; @kuljanin2021 | demonstrated, modelled fuel | outlook: consequence |
+| Probabilistic and adaptive conformance monitoring | @zheng2012; @sotiriou2016; @yan2017 | analytical / simulation | outlook |
+| Flexibility: remaining feasible options and disturbance tolerance | @idris2008 | analytical | outlook |
+
+: Measures relevant to TBO delivery and the evidence behind them. "Operational" means used in routine
+performance monitoring; "proposed" means defined in a report but not implemented. {#tbl-evidence}
+
+Two points stand out. First, the distance-based flight-efficiency indicators are mature, but they
+measure efficiency against a geometric reference, not adherence to an agreed trajectory. Differencing
+the filed-plan and actual-trajectory versions of such an indicator at aggregate level is not a
+measure of plan delivery. Second, the vertical indicator compares flown and filed levels with explicit
+tolerances, but counts flying above the plan as satisfactory. It combines an efficiency judgement with
+an adherence test. @sec-synthetic examines what this means on cases with a known answer.
+
+### Scope of this note
+
+The method concentrates on agreement delivery, the first of the four objects, with what can be
+measured from filed and flown trajectories:
+
+- time offsets at milestones and along the route, separating departure delay from delay gained or
+  recovered in the air;
+- lateral offsets, route changes and the difference in distance flown;
+- level offsets, top-of-climb and top-of-descent shifts, and the distance flown below the requested
+  cruise level;
+- the sequence of FIRs and the time offsets at FIR entries;
+- a minimal view of stability: where a flight was given a revised trajectory before departure, the time
+  offset splits exactly into a revision part and an execution part.
+
+Predictability, full revision histories, the sharing of agreements among stakeholders, and operational
+consequences require data that are not generally archived today: issued predictions with their issue
+times, accepted agreement versions with acceptance times and tolerances, and fuel or cost references.
+They are listed as **data requirements** for a future stage rather than addressed here.
+
+Cross-regional comparison also needs a common **measurement specification**: the reference version and
+its cut-off time, phase boundaries, surveillance coverage, interpolation rules, altitude datum,
+tolerances and aggregation weights. Context such as weather, demand, airspace restrictions, aircraft
+capability and flight length must be reported alongside the measures. An observed deviation is not, by
+itself, evidence of avoidable inefficiency or of the performance of a particular service provider.
+
+## Method {#sec-method}
+
+### Reference and actual trajectory
+
+Each flight is compared against one **reference trajectory** R, a stand-in for the agreed trajectory.
+In the European worked example this is the last filed flight plan (Model 1), or the trajectory after
+ATFM regulation (Model 2) if the flight was regulated. The **actual trajectory** A is the flown
+trajectory (Model 3). The reference used is recorded with every result. Model 1 and Model 2 are proxies
+for an agreed trajectory, not agreements in the TBO sense: neither carries acceptance times or
+tolerances.
+
+Where both versions exist, the time offset at any common event splits exactly into a revision part and
+an execution part:
+
+$$
+\underbrace{t_{M3} - t_{M1}}_{\text{total}} =
+\underbrace{(t_{M2} - t_{M1})}_{\text{revision}} +
+\underbrace{(t_{M3} - t_{M2})}_{\text{execution}}
+$$
+
+For unregulated flights the revision part is zero. Lateral and vertical offsets do not add up in this
+way. They are reported separately against each reference.
+
+The method is a **reference-anchored, contract view**: the question is always how far the actual
+flight is from what was agreed, not how far the plan is from the flight. Three alignments are kept
+apart, because each answers a different question:
+
+| Alignment | Question | Output |
+|---|---|---|
+| Same position along the reference | When did the flight pass this point of the plan? | time offset $\Delta t(s)$, lateral offset $d(s)$, level offset $\Delta FL(s)$ |
+| Same clock time | Where is the flight relative to where it should be now? | distance offset $\Delta s(t)$ |
+| Same operational event | When and where did the flight reach a milestone? | milestone offsets in time, position and level |
+
+Shape-only alignments such as dynamic time warping are not used as primary measures, because they
+remove the timing offset the comparison is meant to expose.
+
+Sign conventions are fixed throughout: $\Delta t > 0$ means late, $\Delta s > 0$ means ahead of the plan,
+$d > 0$ means to the right of the reference track, and $\Delta FL > 0$ means above the reference.
+
+### Densifying both trajectories
+
+Filed plans are sparse: they contain route points and points where the level changes, often tens of
+nautical miles apart. Surveillance-based trajectories are dense but irregular, and partner data may be
+sparse as well. Both trajectories are therefore densified onto regular grids before they are compared:
+
+- the **reference** at a fixed step along its path (1 NM). This defines the **reference progress** $s$,
+  the distance along the reference from its first point. Every position on the plan has a planned time
+  $t_R(s)$ and a planned level $FL_R(s)$;
+- the **actual trajectory** at a fixed time step (30 s).
+
+Between consecutive points, position is interpolated along the great circle, and time and flight level
+linearly.[^projection] Anchoring on the reference has a practical advantage at global scale: a filed plan
+almost always exists, whereas the observed trajectory may be sparse.
+
+[^projection]: In the implementation, each flight is projected onto a local plane centred on the route,
+and positions are interpolated linearly in that plane. Over the leg lengths of a filed plan the
+difference from great-circle interpolation is negligible. The synthetic cases are planar by
+construction.
+
+### Projecting the actual trajectory
+
+Each densified actual position is projected onto the reference **segments**, not onto the nearest
+reference point, so its progress $s_A$ is continuous. The projection also gives the **signed cross-track
+distance** $d$, positive to the right of the reference track.
+
+The projection is **monotone**: each position is searched for only within a window around the progress
+already reached (30 NM back, 60 NM ahead). This prevents a point from being matched to a distant part of
+the route that happens to pass nearby, for example where a route doubles back. Progress never decreases:
+during holdings and vectoring the flight accumulates time without progress, rather than negative distance.
+The number of backward steps of the raw projection is kept as a holding signature.
+
+### Deviations on a common grid
+
+Time, level and lateral offset are evaluated on the **common reference grid** $s$. At each reference
+step, the time at which the actual flight reached that progress, $t_A(s)$, and its level, $FL_A(s)$, are
+interpolated from the densified actual trajectory:
+
+$$
+\Delta t(s) = t_A(s) - t_R(s), \qquad
+\Delta FL(s) = FL_A(s) - FL_R(s), \qquad
+d(s)
+$$
+
+Because each reference step carries the same weight, the result does not depend on how densely the
+actual flight reported. The same-time view is evaluated on the actual trajectory's time grid:
+
+$$
+\Delta s(t) = s_A(t) - s_R(t)
+$$
+
+where $s_R(t)$ is the planned progress at clock time $t$. $\Delta s$ is defined only while the
+reference flight is itself airborne.
+
+### Validity mask, route changes and coverage
+
+The continuous measures are evaluated only where the projection is meaningful:
+
+- **Terminal exclusion**: each trajectory is cut at its **own** 40 NM ring crossings, i.e. the D40 and
+  A40 milestones. The reference grid is restricted to the reference's own D40–A40 span, and the actual
+  trajectory to its own D40–A40 times. Inside the rings, departure and arrival procedures and runway
+  configuration dominate. The terminal phase is covered by the milestones and by taxi and terminal-area
+  measures of the kind documented in TN-01 and TN-02.
+- **Route change (off-route span)**: a sustained excursion from the reference route. A span starts and
+  ends where $|d|$ crosses 5 NM, must reach $|d| > 20$ NM, and must be at least 10 NM long. The two
+  thresholds (hysteresis) make the span cover the whole excursion, not only its outer part. Inside a
+  span no point-wise time or level offset is computed, because the flight is not flying the reference
+  route. Instead, each span is reported as a whole: its extent along the reference, the **extra
+  distance** flown (actual path length minus the reference distance it replaces), and the **time offset
+  at re-join**, where the flight is back on the reference.
+
+**Coverage** is the share of the eligible reference grid that is observed. A reference step counts as
+observed if the actual flight passed it within 15 NM, along its own path, of a real report, i.e. half
+the 30 NM gap threshold. Only the part of a reporting gap that exceeds 30 NM therefore counts as
+unobserved: a 35 NM gap loses 5 NM, a 105 NM gap loses 75 NM. Densified points are never counted as
+observations. Coverage is reported with every indicator, because an unobserved segment is not a
+compliant one.
+
+The 1 NM and 30 s steps, the projection window, the 40 NM terminal radius, the 5/20/10 NM route-change
+parameters and the 30 NM gap threshold are working values to be tested on the European data.
+
+### Flight-level summaries
+
+Each flight is summarised by measures that are kept separate rather than combined into an index:
+
+- **Temporal**: time offset at the first and last valid point, and the **drift** between them. Drift
+  separates delay inherited from departure from delay gained or recovered in the air.
+- **Lateral**: median and maximum $|d|$; number, extent and extra distance of off-route spans, with the
+  time offset at re-join; and the signed difference in distance flown (negative means a shorter
+  actual path). The distance difference is decomposed by zone:
+
+  $$
+  \Delta L = \Delta L_{dep} + \Delta L_{enr} + \Delta L_{arr}
+  $$
+
+  where $\Delta L_{dep}$ and $\Delta L_{arr}$ compare the distance flown inside each trajectory's own
+  40 NM rings, and $\Delta L_{enr}$ is the en-route remainder, to which the off-route spans contribute.
+- **Vertical**: mean $\Delta FL$; the **symmetric share** (grid steps within ±1,000 ft of the reference);
+  the **RP4 share** (within or above, as in the European vertical en-route indicator); the distance cruised
+  more than 1,000 ft below the requested cruise level; and the TOC/TOD offsets in time and distance.
+- **Coverage** as defined above.
+
+Shares are weighted by reference progress, so a holding adds no weight and denser reporting does not
+give a flight more weight.
+
+TOC and TOD are where a trajectory first reaches and last leaves its own maximum level less 1,000 ft.
+They are interpolated between reports, and computed separately on the reference and the actual
+trajectory.
+
+### Milestone engine
+
+The milestones are computed **independently on each trajectory** and then joined by name, so the
+comparison is symmetric and needs no point matching:
+
+| Milestone | Definition |
+|---|---|
+| DEP, ARR | First and last point (in real data: AOBT/ATOT and ALDT/AIBT from APDF where available) |
+| D40, D100, D200 | First exit from the circle of that radius around the departure airport |
+| A200, A100, A40 | Last entry into the circle of that radius around the arrival airport |
+| FIR entries | Every change of FIR, numbered by occurrence (re-entering a FIR is a new event) |
+| TOC, TOD | As defined above |
+
+Crossing times and positions are located on the line between two reports by bisection, not snapped to
+the nearest report. In the output, every milestone is tagged as present on both trajectories, only on the
+reference, or only on the actual flight. A milestone present on one side only, such as an additional FIR,
+is itself a result. For common milestones the time, position and level offsets are reported, together
+with the **segment-wise change** in time offset from the previous common milestone. These changes add
+up to the arrival offset minus the departure offset, the same accounting as the delay chain in TN-02.
+
+The **FIR sequence** is reported as a whole and compared between the two trajectories. With the FIR
+entry time offsets, it is the cheapest signature of plan delivery and works with coarse partner data.
+
+### Tolerance windows
+
+Under TBO, an agreement carries tolerances: a time window at a constraint point, a lateral corridor, a
+vertical band. Delivery is then measured as compliance with the window and, if outside, by how much:
+
+$$
+\text{early exceedance} = \max(L - t_A,\, 0), \qquad
+\text{late exceedance} = \max(t_A - U,\, 0)
+$$
+
+for a window $[L, U]$ at a constraint point. Early and late exceedances are reported separately, because
+they have different operational consequences, and windows may be asymmetric.
+
+Agreed TBO tolerances are not yet recorded in operational data. The nearest existing case is the
+**take-off window of an ATFM slot**: a regulated flight is expected to take off within a stated window
+around its calculated take-off time (CTOT).[^ctot] This window is used as a **proxy tolerance**, and
+labelled as such. It differs from a TBO tolerance in three respects: it is imposed by flow management
+rather than agreed, it applies at a single point (take-off) rather than along the trajectory, and it
+exists only for regulated flights. Its value for this note is methodological: it allows the
+compliance and exceedance measures to be specified and tested on real data before agreed windows exist.
+Where partners operate ATFM programmes with their own slot or departure-time windows, the same
+specification applies with their window definitions.
+
+[^ctot]: In the European network, ATFM slot adherence uses a window of −5 to +10 minutes around the CTOT.
+Other ATFM systems define their own windows.
+
+Tolerance windows derived from the data themselves, such as the range of routinely flown behaviour, are
+not used as agreement tolerances. An empirical envelope describes what usually happens; it does not say
+what was agreed.
+
+### Aggregation
+
+Flight-level results are aggregated according to the question asked, and the rule is stated with every
+aggregate:
+
+- **Flight scorecards** give each flight equal weight: the share of flights within a band, the
+  distribution of drift or of the time offset at a milestone.
+- **Exposure views** sum numerators and denominators over flights: total distance flown off-route over
+  total eligible distance, total time outside a window over total time. These describe the traffic
+  rather than the typical flight, and long flights weigh more.
+- **Percentiles** are computed on the pooled flight-level values of the declared unit (flight, or
+  flight segment). Percentiles of sub-groups are never averaged to obtain an overall percentile.
+- **Signed values, absolute size and compliance are kept separate.** A mean signed offset close to zero
+  can hide early and late flights that cancel out; a standard deviation can hide a uniformly late
+  operation; a compliance share hides the size of the exceedances. Bias, spread and tail are therefore
+  reported together, for example the mean, the mean absolute value and the 90th percentile of the
+  absolute value.
+- **Coverage** is reported with every aggregate, as the share of eligible distance, or of eligible
+  flights, that could be assessed.
+
+Uncertainty intervals for aggregates are computed by resampling whole operating days or traffic flows,
+not individual trajectory points, which are strongly dependent.
+
+## Synthetic test cases {#sec-synthetic}
+
+Before the method is applied to European flight data, it is checked on synthetic trajectories whose
+deviations are known by construction. Each case isolates one phenomenon: a pure clock shift, a lateral
+offset, a level change, a detour or a surveillance gap. For each case, the expected value of every
+measure was stated before the calculation. The cases serve three purposes:
+
+- **Verification**: the algorithm measures what it is meant to measure, and nothing else.
+- **Justification of design choices**: for example, anchoring on the reference trajectory, or keeping
+  time and space offsets as separate measures.
+- **Reference cases for discussion**: they make the behaviour of an indicator visible on trajectories
+  whose ground truth is beyond doubt, which is used below to discuss the vertical en-route indicator.
+
+The synthetic geometry is planar and expressed in nautical miles. The reference flight covers 600 NM
+at 7 NM/min with a cruise level of FL350. The reference is supplied as sparse plan points, as filed
+flight plans are, and the actual flight as 30-second surveillance-like reports. Measures are evaluated
+outside 40 NM of either airport; inside that radius the terminal (ASMA) milestones apply.
+
+### Case catalogue and verification
+
+@tbl-cases lists the cases and their outcomes. All checks pass.
+
+```{r}
+#| label: tbl-cases
+#| tbl-cap: "Synthetic cases: expected behaviour and outcome of the automated check."
+bind_rows(check_cases(res), check_mst(mst)) |>
+  mutate(pass = if_else(pass, "pass", "FAIL")) |>
+  gt() |>
+  cols_label(case = "Case", expectation = "Expected behaviour", pass = "Check")
+```
+
+```{r}
+#| label: tbl-summary
+#| tbl-cap: "Selected measures per synthetic case. Time offsets in minutes (+ = late), distances in NM,
+#|   levels in FL. Shares are distance-weighted along the reference."
+summ |>
+  select(case, dt_entry, drift, ds_med, d_max_abs, dfl_mean, share_sym, share_rp4,
+         ddist_nm, coverage) |>
+  gt() |>
+  fmt_number(-case, decimals = 2) |>
+  cols_label(case = "Case", dt_entry = "Δt entry", drift = "Drift", ds_med = "Δs (median)",
+             d_max_abs = "max |d|", dfl_mean = "ΔFL mean", share_sym = "Symmetric share",
+             share_rp4 = "RP4 share", ddist_nm = "Δ distance", coverage = "Coverage")
+```
+
+### Same position or same time? (C02/C13)
+
+A flight that departs 10 minutes late but otherwise flies its plan exactly is the simplest possible
+deviation. @fig-space-time shows it in two ways. Compared at the same position along the reference,
+the flight is 10 minutes late throughout. Compared at the same clock time, it is 70 NM behind its
+planned position. Both describe one fact. The time view answers "when did the flight pass this
+point?", which is what milestone- and gate-based monitoring requires. The position view answers "where
+should the aircraft be now?", which is the 4D view of a controller or a ground system.
+
+The method therefore reports both. The time view is the primary one, because it does not depend on
+ground speed: 10 minutes of delay is 70 NM at cruise speed but considerably less in the terminal area.
+Shape-only alignments such as dynamic time warping would remove the offset entirely and are not used
+as primary measures.
+
+```{r}
+#| label: fig-space-time
+#| fig-cap: "C13: a departure delay of 10 minutes seen at the same position (time offset) and at the same
+#|   clock time (distance offset). Gaps at the start and end: the measures are evaluated only outside
+#|   the 40 NM terminal radius and while both flights are airborne."
+#| fig-height: 5
+plot_space_time(res)
+```
+
+### Departure delay versus delay gained in the air (C02/C03, C15)
+
+With the reference as anchor, the time offset is known continuously along the route. Its change between
+two points, the *drift*, separates delay inherited from departure from delay accumulated or recovered
+in the air. In C02 (clock shift) the offset is +10 minutes at entry and the drift is zero. In C03, a 5%
+speed reduction after 150 NM, the offset starts at zero and builds up to
+`r sprintf("%.2f", summ$drift[summ$case == "C03 airborne slowdown"])` minutes.
+
+The same idea at milestone level gives the segment-wise change in time offset, used in TN-02 for the
+turnaround chain. @fig-chain shows C15: a flight leaves 8 minutes late, recovers 1.8 minutes en route,
+and loses 2.4 minutes in descent. The segment changes add up exactly to the arrival offset minus the
+departure offset, so every minute is accounted for at a named point of the flight.
+
+```{r}
+#| label: fig-chain
+#| fig-cap: "C15: time offset at common milestones (D/A rings, FIR entries, TOC/TOD). Departure delay
+#|   8 min, partial recovery en route, loss in descent."
+plot_milestone_chain(mst)
+```
+
+### Route changes and FIR sequences (C14)
+
+At global scale, a dense trajectory comparison is not always possible. A cheaper signature is the
+sequence of FIRs traversed and the time offset at each FIR entry. In C14 the flight detours north
+around an area and briefly enters FIR D (@fig-fir). The FIR sequence changes from A–B–C to
+A–B–D–B–C. The milestone engine records the two additional entries as present only in the actual
+trajectory, and every common milestone after the detour is 4.0 minutes late. FIR entries are numbered
+by occurrence, so re-entering a FIR is a separate event rather than overwriting the first entry.
+
+```{r}
+#| label: fig-fir
+#| fig-cap: "C14: detour through FIR D. Points mark FIR entries; the entries into D and the second
+#|   entry into B exist only in the actual trajectory."
+#| fig-height: 3.2
+plot_fir_detour(mst)
+```
+
+### What the vertical en-route indicator measures (C09, C16)
+
+The European RP4 vertical en-route indicator compares flown and filed levels and counts distance
+flown within ±1,000 ft of the plan *or above it* as satisfactory. It is referenced here as an
+established European indicator. The synthetic cases show which question it answers and which it does
+not (@fig-vertical).
+
+- **C09**: the flight cruises at FL390 against a filed FL350. The RP4 share is 1.00. A symmetric share
+  that counts only distance within ±1,000 ft of the plan is 0.32. The indicator judges vertical
+  efficiency (higher is generally better), not adherence to the plan.
+- **C16**: the filed plan is already capped at FL310, whereas the requested cruise level was FL350. The
+  flight follows the plan exactly; both shares are 1.00. About
+  `r round(summ$cruise_below_rfl_nm[summ$case == "C16 capped reference"])` NM are flown 4,000 ft below
+  the requested level, which no indicator measured against the filed plan can detect.
+
+Taken together, the two cases show that the indicator mixes two questions: whether the plan was
+delivered, and whether the vertical profile was efficient. It answers neither completely. The proposed
+method therefore reports the signed level offset, a symmetric adherence share, and the distance flown
+below the requested level as separate measures. Whether the cases occur at a relevant scale is
+examined on the European data (@sec-rp4-tests).
+
+```{r}
+#| label: fig-vertical
+#| fig-cap: "C09 and C16: vertical profiles against the reference with the ±1,000 ft band. Dashed line
+#|   in C16: requested cruise level (FL350)."
+#| fig-height: 3.5
+plot_vertical(res)
+```
+
+### Limits of the synthetic cases
+
+The cases verify the computation, not the operational meaning of the measures. Three behaviours need
+attention when the method moves to real data:
+
+- **Sparse tracks**: on the common reference grid, the drift is reproduced exactly with 2-minute and
+  5-minute reports, and coverage degrades gradually (1.00 and 0.90). An earlier rule, which counted a
+  whole gap as unobserved once it exceeded the threshold, collapsed coverage to near zero at 5-minute
+  reporting although the timing result was correct; it was replaced by the excess-gap rule. The
+  vertical measures are less robust. Linear interpolation between sparse reports cuts the corners of
+  climb and descent: with 5-minute reports the top of descent appears 6 NM early and the symmetric
+  share drops to 0.93, although the flight followed the plan exactly. For sparse partner data, vertical
+  measures should therefore be reported with the reporting interval, and TOC/TOD offsets smaller than
+  about one reporting interval should not be interpreted.
+- **Planar geometry**: real trajectories are projected onto a local plane per flight before the method
+  is applied.
+- **Level offsets on lateral offsets**: a parallel offset makes the actual path slightly longer, which
+  produces a small apparent level offset in climb and descent (C04:
+  `r sprintf("%+.2f", summ$dfl_mean[summ$case == "C04 parallel offset 5 NM"])` FL on average).
+
+## Testing the vertical indicator on operational data {#sec-rp4-tests}
+
+The synthetic cases show *how* the RP4 vertical indicator can mislead; they do not show *how often*
+it does. Before a group of regions considers adopting a vertical indicator of this kind, five hypotheses
+should be tested on operational data. Two are demonstrated synthetically above; three require real
+traffic and are specified here for the European demonstration.
+
+| | Hypothesis | Synthetic evidence | Test on operational data |
+|---|---|---|---|
+| H1 | Counting flight above the plan as satisfactory mixes efficiency with adherence | C09 | Indicator next to the symmetric share and the signed level offset; share of flights where the two disagree, and whether rankings of airports, flows or regions change |
+| H2 | Restrictions already in the plan are invisible | C16 | Filed versus requested cruise level; share of flights scoring "within" while cruising below the requested level |
+| H3 | The indicator is blind to revisions | — | Indicator against the last filed plan and against the revised plan (Model 1, Model 2); revision and execution parts of the level offset for regulated flights |
+| H4 | The indicator ignores time | — | TOC and TOD offsets in time and distance, and level-off duration in climb and descent, for flights with the same indicator value |
+| H5 | Results depend on the tolerance band and the weighting | — | Band of ±500, ±1,000 and ±2,000 ft; distance-weighted versus flight-weighted; per flow versus pooled |
+
+: Hypotheses for evaluating the RP4 vertical indicator. {#tbl-rp4-hyp}
+
+**H3 – revisions.** The indicator compares the flight with the last filed plan. Where a revised
+trajectory changes the planned level, a flight that follows its revision exactly can score poorly, and
+a flight that ignores it can score well. For regulated flights, the level offset is split in the same
+way as the time offset: the difference between the revised and the filed plan (revision), and between
+the flight and the revised plan (execution). Because level offsets are not additive along a
+trajectory, the split is reported at common points of progress rather than as a single number.
+
+**H4 – time.** A share of distance within a band says nothing about when the flight reached its
+level or how long it took. Two flights with the same indicator value can differ by several minutes in
+top of climb, top of descent or time spent levelled off in climb. The test compares these quantities
+across flights grouped by indicator value; a wide spread within a group shows that the indicator does
+not capture them.
+
+**H5 – sensitivity.** The ±1,000 ft band, distance weighting and pooling are conventions. The test
+recomputes the indicator under alternative conventions and checks whether conclusions change,
+in particular rankings between flows, airports or regions. An indicator whose ranking depends on the
+band width or on the weighting is unsuitable for comparison across regions with different traffic
+mixes and flight lengths.
+
+**Global relevance.** The hypotheses matter most for comparison across regions. Three conditions vary
+between regions and interact with the indicator's design:
+
+- **What the reference contains.** In some systems the filed plan already includes level restrictions
+  and capping; in others the filed level is the airspace user's request. The same flown profile then
+  scores differently (H2).
+- **How often plans are revised, and whether revisions are recorded.** Regions with frequent or
+  unrecorded revisions are compared against an outdated reference (H3).
+- **Traffic mix and flight length.** Distance weighting gives long-haul flights more weight; regions
+  with different mixes are not comparable without stating the weighting (H5).
+
+The outcome is reported neutrally. If the hypotheses are not confirmed at a relevant scale, the
+indicator is a reasonable summary of vertical adherence in practice. If they are confirmed, the note
+recommends reporting the components separately: the signed level offset, a symmetric adherence share,
+the distance flown below the requested level, and the TOC/TOD offsets. In either case, the requirement
+for a global indicator is the same: the reference used, and what it contains, must be declared.
+
+## European city pairs: measuring contract delivery {#sec-eur}
+
+```{r eur-guard}
+#| include: false
+# The operational chapters need the local data products in data/tbo/ (not distributed).
+knitr::opts_chunk$set(eval = has_ops)
+```
+
+This chapter applies the principles of @sec-synthetic to real flights. It uses the European network
+because, for each flight, three trajectory versions are archived by the Network Manager: the last filed
+plan (Model 1, M1), the plan re-issued after an ATFM regulation (Model 2, M2, regulated flights only)
+and the flown trajectory (Model 3, M3). This makes it possible to measure delivery against two
+different references for the same flight, and so to test the questions raised in @sec-background:
+which reference, which alignment, and what the difference means.
+
+### Sample and data
+
+Six directions between six PBWG study airports were selected for 1–14 June 2025
+(@tbl-eur-sample). They cover a short connection with dense airspace structure (London–Munich), a
+medium-haul connection across several FIRs (Amsterdam–Madrid), and a longer connection to the
+south-east of the network (Frankfurt–Istanbul). The pairs are illustrative, not representative of the
+network.
+
+```{r tbl-eur-sample}
+#| label: tbl-eur-sample
+#| tbl-cap: "European sample, 1–14 June 2025. Regulated = flight has a Model 2 trajectory."
+tab_sample(d) |> rename(`Airport pair` = PAIR) |> gt_tn()
+```
+
+For every flight the milestone table of TN-01 is built for each trajectory version: range-ring
+crossings at 40, 100 and 200 NM around both aerodromes, top of climb and top of descent, and FIR
+crossings. The actual trajectory is then compared with each available reference in the canonical
+contract table (one row per flight, milestone and reference).
+
+### Which reference? Filed versus regulated plan
+
+About two thirds of the flights in the sample were regulated. For them, the filed plan is no longer the
+trajectory the flight was expected to fly: the regulation moved the take-off time and, in some cases,
+the route. @tbl-eur-refs shows the time offset at the first and last range ring against both references.
+
+```{r tbl-eur-refs}
+#| label: tbl-eur-refs
+#| tbl-cap: "Regulated flights: time offset actual − reference at 40 NM after departure (D40) and before
+#|   arrival (A40), median and interquartile range (IQR), in minutes. M1 = filed plan, M2 = regulated plan."
+tab_pair_refs(d) |>
+  gt_tn(groupname_col = "PAIR") |>
+  cols_label(MST = "Milestone", med_M1 = "Median", iqr_M1 = "IQR", med_M2 = "Median", iqr_M2 = "IQR") |>
+  tab_spanner("against M1 (filed)", c(med_M1, iqr_M1)) |>
+  tab_spanner("against M2 (regulated)", c(med_M2, iqr_M2))
+```
+
+Against the filed plan, regulated flights appear between 4 and 11 minutes late at every milestone, with
+a wide spread. Against the regulated plan, the median offset falls to within about three minutes and
+the spread roughly halves. The choice of reference therefore changes the reading of the same flight from
+"late" to "on time". Both readings are correct: the first measures delivery of the original
+commitment, the second delivery of the trajectory in force at departure.
+
+### Revision and execution
+
+Because times at common milestones are additive, the total offset against the filed plan splits exactly
+into a **revision** part (regulated minus filed plan) and an **execution** part (flown minus regulated
+plan), as introduced in @sec-method. @tbl-eur-decomp shows the split for all regulated flights.
+
+```{r tbl-eur-decomp}
+#| label: tbl-eur-decomp
+#| tbl-cap: "Revision and execution parts of the time offset at the range rings (median, minutes).
+#|   Total = Revision + Execution for each flight."
+tab_decomp(d) |>
+  gt_tn(groupname_col = "GROUP") |>
+  cols_label(MST = "Milestone")
+```
+
+For flights with an ATFM delay, the revision accounts for almost all of the offset against the filed plan
+(about 11 minutes). Against the regulated plan the flights depart about a minute early and gain
+another minute en route. Flights that were regulated without delay show no revision; they leave about
+three minutes late and recover most of it before arrival. The execution spread is similar in both
+groups (IQR 7–8 minutes).
+
+This is the agreement-stability dimension of @sec-background in its simplest form. A monitoring scheme
+that looks only at the latest agreement would report these flights as well delivered; one that looks
+only at the filed plan would attribute the regulation delay to the flight. Reporting both parts keeps
+the two stories apart.
+
+**Example: DLH1304, Frankfurt–Istanbul, 1 June 2025.** The flight received a 32-minute ATFM delay.
+Against the filed plan it is 27 minutes late at D40 and 24 minutes late at A40. Against the regulated
+plan it departs 6 minutes early and arrives 8.5 minutes early (@fig-eur-chain). The flight more than
+recovered against the trajectory it was given, while still arriving well behind the original plan.
+
+```{r fig-eur-chain}
+#| label: fig-eur-chain
+#| fig-cap: "DLH1304 EDDF–LTFM, 1 June 2025: time offset of the flown trajectory against the filed and the
+#|   regulated plan at range rings and FIR crossings."
+#| fig-height: 3.5
+plot_chain(d, 285787181)
+```
+
+### Reroutes: when the agreement changes the path
+
+A regulation can also change the route. Within the six pairs, the regulated plan departs by more than
+5 NM laterally from the filed plan en route for 14 of 611 regulated flights, almost all of them on
+Amsterdam–Madrid (@tbl-eur-route).
+
+```{r tbl-eur-route}
+#| label: tbl-eur-route
+#| tbl-cap: "Regulated flights: route of the regulated plan (M2) compared with the filed plan (M1)."
+tab_route_check(d) |> gt_tn(groupname_col = NULL) |> cols_label(GROUP = "")
+```
+
+To study reroutes beyond the six pairs, all regulated flights at the ten TN-02 study airports in the same
+period were scanned for differences between the filed and regulated routes. Of about 64,000 regulated
+flights, about 2,000 (3%) have a different route description and waypoint sequence. A stratified sample
+of 100 of them, covering all ten airports and the full range of route-length changes, was examined in
+detail. Only 44 differ by more than 5 NM en route; in the others the change is confined to the
+departure or arrival procedure. A route-description change is therefore not by itself a reroute. This
+note defines a **reroute** as a lateral difference of more than 5 NM between the regulated and filed
+plans, excluding the first and last 40 NM.
+
+```{r tbl-eur-reroute}
+#| label: tbl-eur-reroute
+#| tbl-cap: "Reroute sample (study airports, 1–14 June 2025): en-route lateral and time offset of the flown
+#|   trajectory against the filed (M1) and regulated (M2) plan. Medians over flights."
+tab_reroute_delivery(d) |> gt_tn(groupname_col = "GROUP") |> cols_label(REF = "Reference")
+```
+
+For rerouted flights, the regulated plan is also the better lateral reference: the mean cross-track
+distance falls from 3.8 to 2.9 NM and the 95th percentile from 15 to 12 NM (@tbl-eur-reroute). What
+remains is the tactical layer, mainly direct routings that neither plan contains. @fig-eur-reroute shows
+three typical cases. AFR4147 (Hamburg–Paris) and DLH3RJ (Athens–Frankfurt) follow neither the filed nor
+the regulated route for long stretches, taking directs instead; THY1918 (Geneva–Istanbul) follows the
+regulated route closely, including the changed arrival.
+
+```{r fig-eur-reroute}
+#| label: fig-eur-reroute
+#| fig-cap: "Three rerouted flights: filed (M1), regulated (M2) and flown (M3) trajectories."
+#| fig-height: 4
+lab <- d$rr_keys |> mutate(L = paste(AIRCRAFT_ID, paste(ADEP, ADES, sep = "–"))) |> select(ID, L)
+lab_fun <- as_labeller(setNames(lab$L, lab$ID))
+plot_map3(d$rr_prof, c(285745366, 286241176, 285903572), labeller = lab_fun)
+```
+
+The observation matters for contract delivery: a flight can deviate from its agreement in a way that
+shortens it. The lateral offset should therefore be reported with its sign and together with the
+difference in distance flown, so that an authorised shortcut is not read as non-compliance.
+
+
+### Lateral delivery and the FIR sequence
+
+The sequence of FIRs traversed is the simplest lateral signature that also works with sparse data from
+other regions (@sec-synthetic, case C14). Counting each FIR once at its first entry, the flown sequence
+matches the planned one for almost all flights between Amsterdam and Madrid, but for only about half of
+the flights between London and Munich (@tbl-eur-fir).
+
+```{r tbl-eur-fir}
+#| label: tbl-eur-fir
+#| tbl-cap: "Share of flights whose sequence of FIR crossings matches the filed plan (M1)."
+tab_fir_seq(d) |> rename(`Airport pair` = PAIR) |> gt_tn()
+```
+
+On London–Munich the route runs close to several FIR boundaries, so a few nautical miles of direct
+routing change the FIRs crossed. A FIR-sequence mismatch therefore signals a lateral deviation, not its
+size; it should be read together with the cross-track measure.
+
+**Example: AEA36MB, Madrid–Amsterdam, 12 June 2025.** The flight flew 24 NM more than filed. The extra
+distance came from radar vectoring in the last 40 NM before Amsterdam (up to 21 NM cross-track), partly
+offset by a shortcut en route. In time, it carried an 8-minute departure delay through the cruise and
+arrived about 7 minutes late against the filed plan. Against its regulated plan (10 minutes ATFM delay)
+it was 1 minute early at D40 and 3 minutes early at A40. Both the lateral and the temporal pictures are
+needed to describe what happened.
+
+### What the European examples show
+
+- The **reference** determines the result. For regulated flights, delivery against the regulated plan
+  is tight (median within about ±3 minutes) while the offset against the filed plan is dominated by the
+  regulation.
+- The **revision–execution split** separates what the network changed from what the flight did, and
+  makes agreement stability measurable with data that already exist.
+- **Reroutes** are rare (about 3% of regulated flights by route description, fewer by lateral change)
+  but visible; the regulated plan is the better lateral reference for them.
+- The **tactical layer** (directs, vectoring) remains in all cases. It is part of execution and can be
+  beneficial; it should be reported with its sign, not as an error.
+
+## International connections {#sec-intl}
+
+The PBWG's interest is global. This chapter applies the same approach to flights between the European
+study airports and seven partner airports in other regions: Toronto (CYYZ), Atlanta (KATL), São Paulo
+(SBGR), Tokyo Narita (RJAA), Bangkok (VTBS), Singapore (WSSS) and Beijing (ZBAA), 1–7 June 2025.
+
+### The reference is global, the observation is regional
+
+The filed plan (M1) covers the whole flight, so every milestone can be defined at both ends. The flown
+trajectory (M3), however, is built from surveillance and flight data available to the European Network
+Manager. Outside that area it is the filed plan shifted in time. At the partner end of the flight it
+therefore reproduces the reference rather than observing the flight: in this sample, 92–97% of the range
+ring crossings at the partner airport for flights leaving Europe are identical in position and level to
+the filed plan.
+
+To avoid reading these points as perfect delivery, every actual milestone carries an **observation
+status**: observed, extrapolated, proxy or missing. Extrapolated points are reported as "not observed"
+and do not enter the delivery measures.
+
+### Contributing observations at the partner end
+
+Where the European record is extrapolated, other sources can contribute observations of the ring
+crossings. They are used in a fixed order: partner data, OpenSky Network ring crossings, and the European
+correlated surveillance position profile (CPF) where its points lie on both sides of the ring within five
+minutes. @tbl-intl-sources shows the share of 100 NM ring crossings at the partner airport filled by
+each source.
+
+```{r tbl-intl-sources}
+#| label: tbl-intl-sources
+#| tbl-cap: "Source of the observed 100 NM ring crossing at the partner airport (A100 = arrival from Europe,
+#|   D100 = departure to Europe), share of flights, 1–7 June 2025. No partner data were used in this
+#|   demonstration."
+tab_intl_sources(d) |> gt_tn(groupname_col = "INTL") |> fmt_percent(where(is.double), decimals = 0) |>
+  cols_label(MST = "Ring")
+```
+
+Coverage differs strongly between partner airports. Observations exist for nearly all flights at
+Toronto, Atlanta and Singapore, and for most at Tokyo, while arrivals at São Paulo and Beijing are almost
+entirely unobserved from European sources. These gaps are where partner contributions add most: a
+partner's own record of the ring crossings, landing and in-block times would turn "not observed" into
+"delivered" without any change to the method.
+
+### Delivery at both ends of the flight
+
+@tbl-intl-delivery compares the time offset against the filed plan at the European end and at the
+partner end of the flight, using observed milestones only.
+
+```{r tbl-intl-delivery}
+#| label: tbl-intl-delivery
+#| tbl-cap: "Time offset actual − filed plan (median, minutes) at the European and the partner end of the
+#|   flight, observed ring milestones only, 1–7 June 2025."
+tab_intl_delivery(d) |>
+  select(INTL, DIR, `dt_European end`, `dt_partner end`, `iqr_European end`, `iqr_partner end`) |>
+  gt_tn(groupname_col = "INTL") |>
+  cols_label(DIR = "Direction", `dt_European end` = "European end", `dt_partner end` = "Partner end",
+             `iqr_European end` = "European end", `iqr_partner end` = "Partner end") |>
+  tab_spanner("Median", c(`dt_European end`, `dt_partner end`)) |>
+  tab_spanner("IQR", c(`iqr_European end`, `iqr_partner end`))
+```
+
+The difference between the two ends measures what happened on the long-haul segment outside the European
+area: time recovered or lost en route. Without observations at the partner end, this segment is
+invisible, and the time offset at arrival simply repeats the offset at departure.
+
+**Example: THA911, London–Bangkok.** The flight left London 32 minutes behind its filed plan. The
+European record extrapolates the arrival in Bangkok with the same offset. OpenSky observations of the
+100 NM and 40 NM ring crossings around Bangkok show the actual offset at arrival (31 and 33 minutes). In
+this case the delay was carried through the flight; the observation confirms it rather than assuming it.
+
+### FIR crossings outside Europe
+
+For the international flights, about three quarters of the FIR crossings outside the European area are
+extrapolated in the European record (@tbl-intl-fir). The range rings around the partner airport serve as
+a first, data-light substitute for these boundaries. Observed FIR crossings in the partner region would
+allow the same milestone measures along the whole route.
+
+```{r tbl-intl-fir}
+#| label: tbl-intl-fir
+#| tbl-cap: "FIR crossings of the international flights by status. INTL = crossing into a FIR outside the
+#|   European area; ENR = crossings within it."
+tab_intl_fir_obs(d) |> gt_tn(groupname_col = NULL) |> cols_label(SIDE = "")
+```
+
+### What the international examples show
+
+- The method transfers unchanged: the same milestones, the same contract table and the same measures.
+- The **binding constraint is observation**, not method. The filed plan defines the milestones
+  globally; observed actual times exist only where a region, or an open source, records them.
+- The **observation status** makes the gap explicit and countable. Each partner contribution, such as
+  ring crossings, FIR entries, landing and in-block times, closes a measurable part of it.
+
+## Conclusions and next steps {#sec-conclusions}
+
+This note set out to explore how trajectory-based operations can be measured from an operational
+performance perspective, and to test a practical approach on synthetic and real data.
+
+1. **Contract delivery, not deviation.** Measures are anchored on a declared reference trajectory, keep
+   their sign, and are reported separately for time, lateral and vertical dimensions. Adherence and
+   efficiency are not mixed.
+2. **The reference must be declared.** For regulated flights, delivery against the filed plan and
+   against the regulated plan tell different stories. Both are needed, and the revision–execution split
+   connects them exactly in time.
+3. **Milestones scale; continuous measures explain.** Range rings, top of climb and descent, and FIR
+   crossings provide a compact, comparable view that works with sparse data. Continuous cross-track and
+   along-track measures explain what happened between milestones where dense data exist.
+4. **Observation status is part of the measure.** Extrapolated or proxy values are labelled and kept
+   out of delivery statistics, so that missing observations are visible rather than hidden.
+5. **Partners can close the gaps directly.** Milestone times at the partner end (ring crossings, FIR
+   entries, landing and in-block) are sufficient to extend the European demonstration to full
+   origin–destination coverage.
+
+Proposed next steps for the PBWG:
+
+- agree a minimal **measurement specification**: reference versions and cut-off times, milestone set,
+  ring radii, tolerances and aggregation rules;
+- invite partners to contribute **milestone observations** for the study airports in the canonical
+  table format;
+- extend the European demonstration to a **season**, and add FIR crossings for the regulated plan;
+- explore **predictability** and **revision history** as data on archived predictions and agreement
+  versions become available.
