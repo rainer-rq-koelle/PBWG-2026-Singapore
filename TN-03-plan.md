@@ -233,6 +233,66 @@ TN's explanatory figures; real flights are combinations of them.
 5. Verify the ARP coordinates in `tbo_arp` (currently from memory).
 6. Add RTFM once it is located (`MODEL = "M2"`, revision + execution split).
 
+## Internationalisation (plan 2026-11-05)
+
+Check (1–7 June 2025, hub <-> CYYZ/KATL/RJAA/SBGR/VTBS/WSSS/ZBAA, 1,532 flights): ring milestones M3 vs M1.
+
+| End | Ring | identical position + FL (%) | median Δt (min) |
+|---|---|---|---|
+| INTL arrival | A200/A100/A40 | 92–97 | 6.8–6.9 (= Δt at EUR departure, 6.5–6.9) |
+| INTL departure | D200/D100/D40 | 36–48 | 12.2–12.8 (= Δt at EUR arrival, 12.5–13.1) |
+| EUR end | all rings | 3–21 | – |
+
+- Outside the NM area, M3 for flights **leaving** Europe is M1 shifted by the time offset at exit: no observation,
+  and en-route gain or loss outside EUR is invisible.
+- For flights **arriving** in Europe, M3 at the INTL departure end is partly updated (position P90 11–27 NM), but the
+  source is unclear (FPL updates or surveillance?). Treat it as unverified.
+- Point density near the INTL airports is fine (about 9 points within 40 NM, about 20 within 200 NM). The gaps are mid-ocean
+  (max gap 400–3,300 NM). This is not a problem for the ring milestones.
+
+Strategy
+1. **Reference (M1) is global**: the filed trajectory covers the whole route, so rings at both ends are always defined.
+   M2 is pending (RTFM access); use M1, with a synthetic M2 only for the method demonstration.
+2. **Actual is labelled by observation status** per milestone: `OBS = observed | extrapolated | partner | osn`.
+   Rule: M3 milestone with ΔPOS < 0.1 NM and ΔFL = 0 at both ends, outside the NM area -> `extrapolated`.
+   Extrapolated milestones are reported as "not observed", never as delivered.
+3. **Range rings around the INTL airport** (A/D 200/100/40) are the proxy boundaries, so no global FIRs are needed. Add one
+   universal contract point: **NM-area boundary entry/exit** (`xx-test-gotcha/R/eur-boundary-crossings.R`),
+   observed on the EUR side.
+4. **Actual at the INTL end**: from partner data (ALDT/AIBT, ATOT/AOBT, rings from partner surveillance), which is
+   the incentive framing. OSN is an optional gap filler near the INTL airports only (ring crossings, not full profiles),
+   on a small sample to show feasibility. No broad profile augmentation.
+5. Demonstration in the TN:
+   - EUR–EUR showing full contract delivery;
+   - EUR–INTL showing delivery observed on the EUR side, "not observed" at the INTL side;
+   - with partner or OSN data, the gap closed.
+   This shows directly what partner data adds.
+
+### Actual-source test at INTL end (1–7 June 2025, 1,532 flights)
+
+| INTL | NM CPF within 200 NM | OSN/OPDI C100 coverage arr / dep |
+|---|---|---|
+| CYYZ, KATL | dense (45 s) | 0.99 / 0.87 |
+| SBGR | dense | 0.01 / 0.00 (C40_ARR 38 of 99) |
+| ZBAA | dense | – / 0.04 |
+| WSSS | endpoint only | 0.97 / 0.84 |
+| VTBS | endpoint only | 0.71 / 0.33 (C40 ~0.8) |
+| RJAA | endpoint only | 1.00 / 0.71 |
+
+- CPF and OSN complement each other: CPF covers the Americas and ZBAA, OSN covers WSSS/RJAA/VTBS, and ZBAA is covered by CPF.
+- OSN gives C40/C100 (and 50/60/110/120 NM) in the flight list, but no 200 NM; we accept 100 NM as the outer ring internationally.
+- OSN Δt to M1 is plausible: e.g. WSSS A100 median +3.9 min, against M3 extrapolated +6.9; only a few cases
+  with |Δt| > 60 min (linkage check needed).
+- Source order for the INTL-end actual: partner > OSN ring event > CPF (with guard: points on both sides of the ring,
+  gap ≤ 5 min) > M3 (labelled extrapolated). The source is recorded per milestone (`OBS`).
+- Aireon (ECTRL feed, partial, NM-relevant points only): trial pending. Hive JDBC jar and secrets exist
+  (data-fetcher); there is no R driver (odbc/RJDBC not installed). Options: install RJDBC, or extract once via the
+  data-fetcher app.
+- Aireon: parked (2026-11-05). Hive returns 401 despite a fresh workload password, so it is an environment access/role
+  issue (de-live / az-live). The script `python/aireon_trial.py` is ready; use it only to fill complete gaps.
+- Decision: OSN/OPDI flight-list ring crossings (C40/C100, both ends) are the primary "actual" at the INTL end;
+  NM CPF (with guard) fills SBGR/ZBAA; M3 outside the NM area = extrapolated. Outer international ring = 100 NM.
+
 ## Open points
 
 - Whether RTFM is available through `point_profiles_tidy()`; how the regulated flag and CTOT are sourced.

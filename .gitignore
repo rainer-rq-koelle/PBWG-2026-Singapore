@@ -41,3 +41,6 @@ data/*.csv
 data/share/
 data/intl/
 !data/ref-pbwg-airports.csv
+
+# local Python env (TN-03 Aireon trial)
+.venv/
