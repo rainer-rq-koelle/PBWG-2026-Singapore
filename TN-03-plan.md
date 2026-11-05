@@ -314,6 +314,47 @@ Week 1 international flights (1,532 flights, 32.6k points), `data/tbo/TBO-contra
 - 7,388 of 10,341 non-EUR FIR crossings are not observed. That is the measurable gap partners can close.
 - Share of observed points per flight: EUR->INTL 0.52–0.69, INTL->EUR 0.64–0.89.
 - At least one observed INTL ring: ≥ 96% for most airports; ZBAA arrivals 45%, SBGR arrivals 76%.
+## M2 (RTFM) added (2026-11-05)
+
+- Source: Databricks data product `dp_all_ft_flights / output_flights` (v1.0.0), column `rtfm_all_ft_pt_list`.
+  - Linked via `ifps_id` = `FLX.FLIGHT.IFPS_PLAN_ID`; latest version per flight.
+  - Extracted in 7 chunks (no file writes in Databricks, preview download cap ~10k rows).
+  - All 611 regulated flights, 40,378 points; parser in `R/tbo-rtfm.R`.
+- **Timestamp issue:** Databricks timestamps (`time_over`, `lobt`, `cobt`) are written with a "Z" suffix but are 2 h
+  behind UTC, i.e. local time CEST (Europe/Paris) labelled as UTC. Verified against PRISME `LOBT`/`COBT_2` (Δ = −120 min
+  for all). Corrected with +2 h (valid for summer time only). To be raised with the data product owner.
+- M2 vs M1:
+  - Departure shift = `COBT_2 − EOBT_1` for 100% of flights (= ATFM delay for 76%).
+  - Route identical for 595 of 611 flights.
+  - 14 reroutes (EHAM–LEMD 12: two ~28 NM alternatives ±26/+51 NM; EDDF–LTFM 1; LTFM–EDDF 1); 2 minor (≤3 NM) point changes.
+  - 220 zero-delay flights: 213 identical, 5 reroute, 2 minor. So zero-delay "regulated" flights are mostly
+    re-issued slots without a time or route change, not reroutes.
+- Ring decomposition (TOTAL = REVISION + EXECUTION, exactly additive), medians:
+  - delay > 0: revision ≈ +11 min, execution −0.8 (D40) → −1.9 (A40). The flight recovers about 1–2 min against
+    the regulated plan.
+  - delay = 0: revision 0, execution +2.9 (D40) → +0.6 (A40).
+  - Execution IQR is about 7–8 min in both groups.
+## Reroutes (2026-11-05)
+
+- Scan (Databricks, regulated flights at the 10 study airports, 1–14 June 2025): of 64,219, 1,998 (3.1%) have a
+  different route string AND waypoint sequence (M1 vs M2), and 588 differ in the route string only. `rerouting_why` is not
+  informative (93% `N`). Databricks `atfm_delay` is in seconds.
+- **Reroute definition (adopted):** M2 deviates more than 5 NM laterally from M1 en route (first and last 40 NM of
+  M1 excluded); `R/tbo-reroute.R` → `reroute_flags()`. In the 98-flight showcase, 44 meet it; the remainder are SID/STAR
+  or naming changes.
+- Delivery against M1 vs M2 (`compare_refs()`), en-route medians:
+
+  | Group | Ref | cross-track mean | cross-track P95 | Δt en route (IQR) |
+  |---|---|---|---|---|
+  | reroute (44) | M1 | 3.8 NM | 15.2 NM | 9.9 min (13.6) |
+  | reroute (43) | M2 | 2.9 NM | 12.2 NM | −0.8 min (6.5) |
+  | no reroute (54) | M1 | 2.8 NM | 9.8 NM | 9.2 min (12.5) |
+  | no reroute (54) | M2 | 2.8 NM | 9.9 NM | 1.1 min (6.2) |
+
+  M2 as the reference roughly halves the timing spread for all regulated flights. For reroutes it also reduces the
+  lateral deviation. The remaining ~3 NM mean / ~12 NM P95 cross-track is tactical (directs).
+- Not yet in the canonical contract table: the FIR crossings for M2 (no M2 airspace profile; would need polygon
+  intersection or the Databricks `rtfm_all_ft_asp_list`).
 
 ## Open points
 

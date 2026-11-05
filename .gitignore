@@ -44,3 +44,6 @@ data/intl/
 
 # local Python env (TN-03 Aireon trial)
 .venv/
+
+# TN-03 local data (flight-level, never commit)
+data/tbo/
