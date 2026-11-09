@@ -208,3 +208,88 @@ plot_tha_arrival <- function(th) {
     labs(x = "duration (min)", y = NULL, colour = "Arrival aerodrome") +
     theme(legend.position = "bottom", axis.text.y = element_blank())
 }
+
+# ---- Continuous, vertical, tolerance and coverage measures (European sample) --------------------
+
+conf_load <- function() {
+  read_parquet(tbo_dir("TBO-dev-conformance-M1M2-20250601-20250614.parquet")) |>
+    left_join(read_parquet(tbo_dir("TBO-dev-flights-20250601-20250614.parquet")) |>
+                select(ID, PAIR, REGULATED, ATFM_DELAY, AOBT_3, TAXI_TIME_3, COBT_2, TAXI_TIME_1), by = "ID") |>
+    left_join(read_parquet(tbo_dir("TBO-dev-flight-extras-20250601-20250614.parquet")), by = "ID")
+}
+
+q3 <- function(x) sprintf("%.1f [%.1f; %.1f]", median(x, na.rm = TRUE),
+                          quantile(x, .25, na.rm = TRUE), quantile(x, .75, na.rm = TRUE))
+
+# One table: the proposed measures computed for regulated flights against both references
+tab_measures_demo <- function(cf) {
+  cf |>
+    filter(REGULATED) |>
+    group_by(REF_MODEL) |>
+    summarise(
+      `Time offset at entry (min)` = q3(dt_entry),
+      `Drift en route (min)` = q3(drift),
+      `Median |cross-track| (NM)` = q3(d_med_abs),
+      `Distance difference (NM)` = q3(ddist_nm),
+      `  of which en route (NM)` = q3(ddist_enr),
+      `  of which arrival 40 NM (NM)` = q3(ddist_arr),
+      `Level within ±1,000 ft (share)` = q3(share_sym),
+      `Level within or above (share)` = q3(share_rp4),
+      `TOD offset (min)` = q3(dTOD_min),
+      `Coverage (share)` = q3(coverage),
+      .groups = "drop") |>
+    pivot_longer(-REF_MODEL, names_to = "Measure") |>
+    pivot_wider(names_from = REF_MODEL, values_from = value)
+}
+
+tab_drift_pair <- function(cf) {
+  cf |>
+    filter(REF_MODEL == "M1") |>
+    group_by(PAIR = factor(PAIR, pair_levels)) |>
+    summarise(Flights = n(), `Entry offset (min)` = median(dt_entry, na.rm = TRUE),
+              `Exit offset (min)` = median(dt_exit, na.rm = TRUE), `Drift (min)` = median(drift, na.rm = TRUE),
+              `Drift P10` = quantile(drift, .1, na.rm = TRUE), `Drift P90` = quantile(drift, .9, na.rm = TRUE),
+              `Coverage` = median(coverage, na.rm = TRUE), .groups = "drop")
+}
+
+tab_vertical <- function(cf) {
+  cf |>
+    filter(REF_MODEL == "M1") |>
+    group_by(PAIR = factor(PAIR, pair_levels)) |>
+    summarise(Flights = n(),
+              `Within ±1,000 ft` = median(share_sym, na.rm = TRUE),
+              `Within or above` = median(share_rp4, na.rm = TRUE),
+              `Flights where the two differ by > 0.10 (%)` = 100 * mean(share_rp4 - share_sym > 0.10, na.rm = TRUE),
+              `Mean level offset (FL)` = median(dfl_mean, na.rm = TRUE),
+              `Cruise below requested level (NM)` = median(cruise_below_rfl_nm, na.rm = TRUE),
+              .groups = "drop")
+}
+
+tab_slot_window <- function(cf, lo = -5, hi = 10) {
+  cf |>
+    filter(REF_MODEL == "M1", REGULATED) |>
+    mutate(ATOT = AOBT_3 + lubridate::minutes(TAXI_TIME_3), CTOT = COBT_2 + lubridate::minutes(TAXI_TIME_1),
+           DEV = as.numeric(difftime(ATOT, CTOT, units = "mins"))) |>
+    filter(!is.na(DEV)) |>
+    group_by(PAIR = factor(PAIR, pair_levels)) |>
+    summarise(Flights = n(), `Within window (%)` = 100 * mean(DEV >= lo & DEV <= hi),
+              `Early (%)` = 100 * mean(DEV < lo), `Late (%)` = 100 * mean(DEV > hi),
+              `Mean early exceedance (min)` = if (any(DEV < lo)) mean(lo - DEV[DEV < lo]) else NA_real_,
+              `Mean late exceedance (min)` = if (any(DEV > hi)) mean(DEV[DEV > hi] - hi) else NA_real_,
+              .groups = "drop")
+}
+
+plot_profile_flight <- function(pf) {
+  pf |>
+    filter(eligible) |>
+    select(REF_MODEL, s, dt, d, dfl) |>
+    tidyr::pivot_longer(c(dt, d, dfl)) |>
+    mutate(name = recode(name, dt = "time offset (min)", d = "cross-track (NM, + = right)", dfl = "level offset (FL)"),
+           REF = if_else(REF_MODEL == "M1", "filed plan (M1)", "regulated plan (M2)")) |>
+    ggplot(aes(s, value, colour = REF)) +
+    geom_hline(yintercept = 0, colour = "grey50") +
+    geom_line() +
+    facet_wrap(~name, ncol = 1, scales = "free_y") +
+    labs(x = "distance along the reference (NM)", y = NULL, colour = NULL) +
+    theme(legend.position = "bottom")
+}

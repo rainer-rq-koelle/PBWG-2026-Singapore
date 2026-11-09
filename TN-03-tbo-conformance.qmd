@@ -49,11 +49,52 @@ summ <- res |> select(case, summ) |> unnest(summ)
 
 # Operational data (European and international chapters); local only, not distributed with the note
 has_ops <- tbo_has_data()
-if (has_ops) d <- tbo_load()
+if (has_ops) {
+  d <- tbo_load()
+  cf <- conf_load()
+  pf_aea <- arrow::read_parquet(tbo_dir("TBO-dev-profile-AEA36MB.parquet"))
+}
 f1 <- function(x) sprintf("%.1f", x)
 gt_tn <- function(x, ...) gt(x, ...) |> fmt_number(where(is.double), decimals = 1) |>
   tab_options(table.font.size = px(12))
 ```
+
+## Key messages {.unnumbered}
+
+- **Measure contract delivery, not deviation.** Compare the flown trajectory with a declared reference
+  trajectory, keep every offset signed, and report time, lateral and vertical dimensions separately.
+- **Declare the reference.** For flights subject to air traffic flow management, the filed plan and the
+  regulated plan give different answers. In the European sample, regulated flights are a median 8 minutes
+  late against the filed plan, but within 1 minute of the regulated plan. Both views are needed; their
+  difference measures how much the agreement changed before execution.
+- **Use milestones to compare, continuous measures to explain.** Range-ring crossings, top of climb and
+  descent, and FIR crossings form a compact set of contract points that works with sparse data. Along-route
+  measures (drift, cross-track, level offset) explain what happened between them.
+- **Label what was observed.** Outside a region's surveillance area, the flown trajectory is often
+  extrapolated from the plan. Each milestone therefore carries an observation status, and only observed
+  values enter the measures.
+- **Partner data close the gaps.** Milestone observations at the partner end of international flights,
+  in a common format, complete the picture. The contribution from Thailand shows that this works without
+  conversion.
+
+@tbl-measures summarises the proposed measures and where each is demonstrated in this note.
+
+| Dimension | Measure | Minimum data | Demonstrated in |
+|---|---|---|---|
+| Time | Time offset at milestones (rings, FIR entries, TOC/TOD, landing) | reference and observed milestone times | synthetic; @sec-eur; @sec-intl; @sec-tha |
+| Time | Drift en route (change of time offset between entry and exit of the en-route phase) | reference trajectory, observed trajectory | synthetic; @sec-eur-cont |
+| Time | Segment change of time offset between consecutive milestones | milestone times | synthetic; @sec-eur |
+| Time | Compliance with a time window and early/late exceedance | window definition, observed time | @sec-eur-window (ATFM slot window as proxy) |
+| Stability | Revision and execution parts of the time offset | two reference versions (filed, revised) | @sec-eur |
+| Lateral | Signed cross-track distance; off-route spans with extra distance | reference trajectory, observed trajectory | synthetic; @sec-eur-cont |
+| Lateral | Distance difference flown, split into departure, en route and arrival | as above | synthetic; @sec-eur-cont |
+| Lateral | FIR sequence match | FIR crossings | synthetic; @sec-eur |
+| Lateral | Reroute (revised plan > 5 NM from filed plan en route) | two reference versions | @sec-eur |
+| Vertical | Level offset; share within ±1,000 ft; share within or above | reference and observed levels | synthetic; @sec-rp4-tests |
+| Vertical | Distance cruised below the requested level; TOC/TOD offsets | requested level; trajectories | synthetic; @sec-rp4-tests |
+| Observation | Observation status per milestone; coverage of the en-route grid | source of each observed value | @sec-eur-cont; @sec-intl |
+
+: Proposed measures, minimum data and where they are demonstrated. {#tbl-measures}
 
 ## Introduction {#sec-intro}
 
@@ -362,7 +403,7 @@ give a flight more weight.
 
 TOC and TOD are where a trajectory first reaches and last leaves its own maximum level less 1,000 ft.
 They are interpolated between reports, and computed separately on the reference and the actual
-trajectory.
+trajectory. The same definition is used for the synthetic cases and for the operational data.
 
 ### Milestone engine
 
@@ -374,7 +415,7 @@ comparison is symmetric and needs no point matching:
 | DEP, ARR | First and last point (in real data: AOBT/ATOT and ALDT/AIBT from APDF where available) |
 | D40, D100, D200 | First exit from the circle of that radius around the departure airport |
 | A200, A100, A40 | Last entry into the circle of that radius around the arrival airport |
-| FIR entries | Every change of FIR, numbered by occurrence (re-entering a FIR is a new event) |
+| FIR entries | Every change of FIR, numbered by occurrence (re-entering a FIR is a new event). In the European data, the upper and lower parts of a FIR (FIR/UIR) are merged and visits shorter than 60 s are discarded; for the comparison of FIR sequences each FIR is counted once, at its first entry |
 | TOC, TOD | As defined above |
 
 Crossing times and positions are located on the line between two reports by bisection, not snapped to
@@ -598,8 +639,8 @@ attention when the method moves to real data:
 
 The synthetic cases show *how* the RP4 vertical indicator can mislead; they do not show *how often*
 it does. Before a group of regions considers adopting a vertical indicator of this kind, five hypotheses
-should be tested on operational data. Two are demonstrated synthetically above; three require real
-traffic and are specified here for the European demonstration.
+should be tested on operational data. Two are demonstrated synthetically above. @tbl-rp4-hyp lists all
+five, and @tbl-vertical gives first results from the European sample of @sec-eur (950 flights).
 
 | | Hypothesis | Synthetic evidence | Test on operational data |
 |---|---|---|---|
@@ -610,6 +651,32 @@ traffic and are specified here for the European demonstration.
 | H5 | Results depend on the tolerance band and the weighting | — | Band of ±500, ±1,000 and ±2,000 ft; distance-weighted versus flight-weighted; per flow versus pooled |
 
 : Hypotheses for evaluating the RP4 vertical indicator. {#tbl-rp4-hyp}
+
+```{r tbl-vertical}
+#| label: tbl-vertical
+#| tbl-cap: "Vertical measures against the filed plan, European sample, 1–14 June 2025 (medians over
+#|   flights). Shares are weighted by distance along the reference, en route only."
+#| eval: !expr has_ops
+tab_vertical(cf) |> rename(`Airport pair` = PAIR) |> gt_tn() |>
+  fmt_number(c(`Within ±1,000 ft`, `Within or above`), decimals = 2)
+```
+
+The first results support H1 and qualify H2 to H4:
+
+- **H1 – confirmed in the sample.** The two shares differ by more than 0.10 for a large share of
+  flights, up to about 90% on London–Munich, where flights often cruise above the filed level. The
+  "within or above" share is therefore mainly a statement about efficiency on these flows.
+- **H2 – not visible in the filed plans.** In this sample the filed cruise level never lies below the
+  requested level, so restrictions do not enter the plan in the way C16 assumes. The distance cruised
+  below the requested level comes from the flown profile (median 9–38 NM per pair), mainly on short
+  flights, and is not captured by either share.
+- **H3 – small effect here.** For regulated flights, the shares change by more than 0.05 between the
+  filed and the regulated plan for fewer than 1% of flights: the regulations in the sample shifted times
+  and, rarely, routes, but almost never levels.
+- **H4 – confirmed.** Among flights with a "within or above" share of at least 0.85, the top-of-descent
+  offset still ranges from about −3 to +23 minutes (10th to 90th percentile). The share says nothing about
+  when the descent took place.
+- **H5** (band width and weighting) has not yet been tested.
 
 **H3 – revisions.** The indicator compares the flight with the last filed plan. Where a revised
 trajectory changes the planned level, a flight that follows its revision exactly can score poorly, and
@@ -678,8 +745,8 @@ tab_sample(d) |> rename(`Airport pair` = PAIR) |> gt_tn()
 
 For every flight the milestone table of TN-01 is built for each trajectory version: range-ring
 crossings at 40, 100 and 200 NM around both aerodromes, top of climb and top of descent, and FIR
-crossings. The actual trajectory is then compared with each available reference in the canonical
-contract table (one row per flight, milestone and reference).
+crossings. The actual trajectory is then compared with each available reference in a common milestone
+table (one row per flight, milestone and reference; @sec-annex-data).
 
 ### Which reference? Filed versus regulated plan
 
@@ -699,7 +766,8 @@ tab_pair_refs(d) |>
 ```
 
 Against the filed plan, regulated flights appear between 4 and 11 minutes late at every milestone, with
-a wide spread. Against the regulated plan, the median offset falls to within about three minutes and
+a wide spread. Against the regulated plan, the median offset falls to within about three minutes for most
+pairs (six minutes at most, for arrivals in Istanbul) and
 the spread roughly halves. The choice of reference therefore changes the reading of the same flight from
 "late" to "on time". Both readings are correct: the first measures delivery of the original
 commitment, the second delivery of the trajectory in force at departure.
@@ -811,10 +879,82 @@ size; it should be read together with the cross-track measure.
 
 **Example: AEA36MB, Madrid–Amsterdam, 12 June 2025.** The flight flew 24 NM more than filed. The extra
 distance came from radar vectoring in the last 40 NM before Amsterdam (up to 21 NM cross-track), partly
-offset by a shortcut en route. In time, it carried an 8-minute departure delay through the cruise and
+offset by a shortcut en route. In time, it was 9 minutes behind the filed plan at the 40 NM ring after
+departure, carried this through the cruise and
 arrived about 7 minutes late against the filed plan. Against its regulated plan (10 minutes ATFM delay)
 it was 1 minute early at D40 and 3 minutes early at A40. Both the lateral and the temporal pictures are
 needed to describe what happened.
+
+### Along the route: drift, lateral and vertical offsets {#sec-eur-cont}
+
+The milestones are complemented by the continuous measures of @sec-method, computed on the reference
+grid between the 40 NM rings. @fig-eur-profile shows them for AEA36MB against both references. The
+lateral and vertical offsets are the same for both references, because the regulation changed only the
+time of this flight. The time offset is shifted by the regulation, but its shape is the same: the flight
+lost about 2.5 minutes over the en-route phase against either reference.
+
+```{r fig-eur-profile}
+#| label: fig-eur-profile
+#| fig-cap: "AEA36MB LEMD–EHAM, 12 June 2025: cross-track distance, level offset and time offset along the
+#|   reference, en-route phase (between the 40 NM rings), against the filed and the regulated plan."
+#| fig-height: 6
+plot_profile_flight(pf_aea)
+```
+
+@tbl-eur-measures summarises the proposed flight-level measures for all regulated flights against both
+references. Three observations stand out:
+
+- Only the **time offset at entry** depends on the reference. The **drift** en route (median −1.4
+  minutes: most flights recover some time in cruise) and all lateral and vertical measures are the same
+  against both plans, because regulations in this sample rarely changed the route or the level.
+- The **distance difference** is close to zero in the median but has a wide spread. Its split by zone
+  shows the pattern seen for AEA36MB: shorter routes en route (directs, median −2.4 NM) and longer paths
+  in the last 40 NM before landing (vectoring, up to 19 NM at the 75th percentile).
+- **Coverage** of the en-route grid by observed reports is about 0.8. The remainder lies in gaps between
+  reports, mostly on long straight segments, where the interpolated values are reliable but are not
+  counted as observations.
+
+```{r tbl-eur-measures}
+#| label: tbl-eur-measures
+#| tbl-cap: "Proposed flight-level measures for regulated flights (611), against the filed (M1) and the
+#|   regulated (M2) plan. Median [25th; 75th percentile]. En-route phase between the 40 NM rings unless
+#|   stated otherwise."
+tab_measures_demo(cf) |> gt() |>
+  cols_label(M1 = "against filed plan (M1)", M2 = "against regulated plan (M2)") |>
+  tab_options(table.font.size = px(12))
+```
+
+@tbl-eur-drift gives the drift per airport pair against the filed plan. On Madrid–Amsterdam flights
+recover about 3 minutes en route; on Istanbul–Frankfurt they lose time slightly. The spread is wide for
+all pairs: the drift distinguishes delay inherited from departure from delay gained or recovered in the
+air for each flight.
+
+```{r tbl-eur-drift}
+#| label: tbl-eur-drift
+#| tbl-cap: "Time offset at entry and exit of the en-route phase and drift between them, against the filed
+#|   plan, all flights (medians; P10 and P90 of the drift). Coverage = share of the en-route grid observed."
+tab_drift_pair(cf) |> rename(`Airport pair` = PAIR) |> gt_tn() |> fmt_number(Coverage, decimals = 2)
+```
+
+### Tolerance windows: the ATFM slot as a proxy {#sec-eur-window}
+
+@sec-method proposed measuring delivery against a time window, with early and late exceedance reported
+separately. No agreed TBO windows exist in the data, but regulated flights have a take-off window around
+their calculated take-off time (in the European network, −5 to +10 minutes). @tbl-eur-window applies the
+window measures to it.
+
+```{r tbl-eur-window}
+#| label: tbl-eur-window
+#| tbl-cap: "Regulated flights: take-off within the ATFM slot window (−5 / +10 minutes), with early and late
+#|   exceedance. Take-off time derived from off-block time plus taxi time."
+tab_slot_window(cf) |> rename(`Airport pair` = PAIR) |> gt_tn()
+```
+
+Between 83% and 97% of regulated flights took off within the window. Departures outside it were mostly
+early, by less than a minute on average, while the few late departures exceeded the window by several
+minutes. A compliance share alone would hide this asymmetry; the exceedances show it. The same
+measures apply unchanged to any agreed time window, for example at a metering fix or an arrival
+constraint, once such windows are recorded.
 
 ### What the European examples show
 
@@ -899,7 +1039,7 @@ this case the delay was carried through the flight; the observation confirms it 
 
 ### FIR crossings outside Europe
 
-For the international flights, about three quarters of the FIR crossings outside the European area are
+For the international flights, about 70% of the FIR crossings outside the European area are
 extrapolated in the European record (@tbl-intl-fir). The range rings around the partner airport serve as
 a first, data-light substitute for these boundaries. Observed FIR crossings in the partner region would
 allow the same milestone measures along the whole route.
@@ -1018,8 +1158,82 @@ Proposed next steps for the PBWG:
 
 - agree a minimal **measurement specification**: reference versions and cut-off times, milestone set,
   ring radii, tolerances and aggregation rules;
-- invite partners to contribute **milestone observations** for the study airports in the canonical
+- invite partners to contribute **milestone observations** for the study airports in the common
   table format;
 - extend the European demonstration to a **season**, and add FIR crossings for the regulated plan;
 - explore **predictability** and **revision history** as data on archived predictions and agreement
   versions become available.
+
+## Acknowledgements {.unnumbered}
+
+The authors thank the Thai PBWG partners for contributing milestone data for flights to and from Thai
+airports, and the OpenSky Network for the open surveillance data used at the partner airports.
+
+## Appendix A – Data used and observation status {#sec-annex-data .appendix}
+
+This appendix describes the data used in this note by **role**, so that partners can map them to
+their own data holdings. How the European data were extracted is documented separately for internal
+use; it depends on systems that are specific to EUROCONTROL and is not required to apply the method.
+
+| Role | Content | European demonstration | Partner equivalent |
+|---|---|---|---|
+| Reference trajectory | Filed flight plan as a 4D profile (position, time, level) | Network Manager trajectory based on the last filed plan (Model 1) | Filed plan processed by the regional flight data processing system |
+| Revised reference | Plan updated after a flow management measure | Network Manager regulated trajectory (Model 2) | Revised plan or slot-adjusted plan, where recorded |
+| Actual trajectory | Flown trajectory with time and level | Network Manager flown trajectory (Model 3), based on surveillance | Surveillance-based track (radar, ADS-B) |
+| Observed milestones | Times of ring crossings, take-off, landing, off- and in-block | Derived from the actual trajectory; airport data (TN-01, TN-02) | Airport and ANSP records in the PBWG milestone format |
+| Open observations | Ring crossings near partner airports | OpenSky Network | — |
+| Partner contribution | Milestones at the partner end of the flight | Thailand (June–September 2025) | Any partner, same format |
+
+: Data used by role. {#tbl-annex-roles}
+
+| Sample | Period | Flights | Use |
+|---|---|---|---|
+| European city pairs (6 directions) | 1–14 June 2025 | 950, of which 611 regulated | @sec-eur, @sec-rp4-tests |
+| Reroute sample (10 European study airports) | 1–14 June 2025 | about 2,000 candidates; 100 examined | @sec-eur |
+| International connections (7 partner airports) | 1–7 June 2025 | 1,532 | @sec-intl |
+| Thai contribution | 1 June – 30 September 2025 | about 35,000 | @sec-tha |
+
+: Samples. {#tbl-annex-samples}
+
+**Observation status.** Every actual milestone carries one of four values:
+
+| Status | Meaning | Used in measures |
+|---|---|---|
+| observed | Value derived from a surveillance report or a recorded event (including partner and open data) | yes |
+| proxy | Value derived by a stated rule from other observed data | yes, labelled |
+| extrapolated | Value copied or shifted from the reference, e.g. outside a region's surveillance area | no ("not observed") |
+| missing | No value | no |
+
+: Observation status. {#tbl-annex-status}
+
+**Source order at the partner end.** Where several sources provide a milestone, the first available is
+used: partner data, open surveillance data (ring crossings), regional surveillance positions with points
+on both sides of the ring within five minutes, and finally the regional flown trajectory if it differs
+from the plan.
+
+**Times** are in UTC throughout.
+
+## Appendix B – Abbreviations {#sec-abbrev .appendix}
+
+| Abbreviation | Meaning |
+|---|---|
+| A40, A100, A200 | Last entry into the 40/100/200 NM ring around the arrival aerodrome |
+| ADS-B | Automatic dependent surveillance – broadcast |
+| AIBT, ALDT | Actual in-block time, actual landing time |
+| AOBT, ATOT | Actual off-block time, actual take-off time |
+| ANSP | Air navigation service provider |
+| ASMA | Arrival sequencing and metering area |
+| ATFM | Air traffic flow management |
+| CTOT | Calculated take-off time (ATFM slot) |
+| D40, D100, D200 | First exit from the 40/100/200 NM ring around the departure aerodrome |
+| FIR, UIR | Flight information region, upper information region |
+| FL | Flight level |
+| GANP | ICAO Global Air Navigation Plan |
+| IQR | Interquartile range (25th to 75th percentile) |
+| M1, M2, M3 | Filed, regulated and flown trajectory versions in the European network |
+| NM | Nautical mile (and, in context, the EUROCONTROL Network Manager) |
+| PBWG | Performance Benchmarking Working Group |
+| RP4 | Reference period 4 of the European Single Sky performance scheme |
+| TBO | Trajectory-based operations |
+| TN-01, TN-02 | PBWG technical notes on the analytic milestone dataset and on turnaround and delay propagation |
+| TOC, TOD | Top of climb, top of descent |
