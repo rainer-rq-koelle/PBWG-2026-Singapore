@@ -74,7 +74,7 @@ gt_tn <- function(x, ...) gt(x, ...) |> fmt_number(where(is.double), decimals = 
   extrapolated from the plan. Each milestone therefore carries an observation status, and only observed
   values enter the measures.
 - **Partner data close the gaps.** Milestone observations at the partner end of international flights,
-  in a common format, complete the picture. The contribution from Thailand shows that this works without
+  in a common format, complete the picture. The contribution from AEROTHAI shows that this works without
   conversion.
 
 @tbl-measures summarises the proposed measures and where each is demonstrated in this note.
@@ -1051,7 +1051,7 @@ allow the same milestone measures along the whole route.
 tab_intl_fir_obs(d) |> gt_tn(groupname_col = NULL) |> cols_label(SIDE = "")
 ```
 
-### A partner contribution: milestones from Thailand {#sec-tha}
+### A partner contribution: milestones from AEROTHAI {#sec-tha}
 
 ```{r tha-load}
 #| include: false
@@ -1059,8 +1059,9 @@ has_tha <- tha_has_data()
 if (has_tha) th <- tha_load()
 ```
 
-During the preparation of this note, Thailand contributed milestone data for flights to and from its
-airports, covering connections with Singapore and Japan as well as Thai domestic flights, for June to
+During the preparation of this note, AEROTHAI (Aeronautical Radio of Thailand), the air navigation
+service provider of Thailand, contributed milestone data for flights to and from Thai airports, covering
+connections with Singapore and Japan as well as Thai domestic flights, for June to
 September 2025. The data were provided in the PBWG milestone format used in this note: off-block,
 take-off, range-ring crossings at 40 and 100 NM, landing and in-block, each with time and, for the
 ring crossings, position and altitude. They could therefore be used without conversion.
@@ -1073,7 +1074,7 @@ directly as contract points.
 
 ```{r tbl-tha-overview}
 #| label: tbl-tha-overview
-#| tbl-cap: "Milestone data contributed by Thailand, 1 June – 30 September 2025. Shares refer to the Thai
+#| tbl-cap: "Milestone data contributed by AEROTHAI, 1 June – 30 September 2025. Shares refer to the Thai
 #|   end of the flight."
 #| eval: !expr has_ops && has_tha
 tab_tha_overview(th) |> rename(Flow = FLOW) |> gt_tn()
@@ -1106,7 +1107,7 @@ absorbs time, and of where a time constraint agreed in a TBO environment would n
 ```{r fig-tha-arrival}
 #| label: fig-tha-arrival
 #| fig-cap: "Arrivals in Thailand: duration of the 100–40 NM segment and of the 40 NM-to-landing
-#|   segment, by flow and arrival aerodrome. Data contributed by Thailand."
+#|   segment, by flow and arrival aerodrome. Data contributed by AEROTHAI."
 #| fig-height: 4
 #| eval: !expr has_ops && has_tha
 plot_tha_arrival(th)
@@ -1150,7 +1151,7 @@ performance perspective, and to test a practical approach on synthetic and real 
    out of delivery statistics, so that missing observations are visible rather than hidden.
 5. **Partners can close the gaps directly.** Milestone times at the partner end (ring crossings, FIR
    entries, landing and in-block) are sufficient to extend the European demonstration to full
-   origin–destination coverage. The contribution from Thailand (@sec-tha) shows that the format works
+   origin–destination coverage. The contribution from AEROTHAI (@sec-tha) shows that the format works
    as intended: the data could be used without conversion and describe the arrival and departure
    segments at the partner end with the same milestones.
 
@@ -1166,7 +1167,7 @@ Proposed next steps for the PBWG:
 
 ## Acknowledgements {.unnumbered}
 
-The authors thank the Thai PBWG partners for contributing milestone data for flights to and from Thai
+The authors thank AEROTHAI (Aeronautical Radio of Thailand) for contributing milestone data for flights to and from Thai
 airports, and the OpenSky Network for the open surveillance data used at the partner airports.
 
 ## Appendix A – Data used and observation status {#sec-annex-data .appendix}
@@ -1182,7 +1183,7 @@ use; it depends on systems that are specific to EUROCONTROL and is not required 
 | Actual trajectory | Flown trajectory with time and level | Network Manager flown trajectory (Model 3), based on surveillance | Surveillance-based track (radar, ADS-B) |
 | Observed milestones | Times of ring crossings, take-off, landing, off- and in-block | Derived from the actual trajectory; airport data (TN-01, TN-02) | Airport and ANSP records in the PBWG milestone format |
 | Open observations | Ring crossings near partner airports | OpenSky Network | — |
-| Partner contribution | Milestones at the partner end of the flight | Thailand (June–September 2025) | Any partner, same format |
+| Partner contribution | Milestones at the partner end of the flight | AEROTHAI, Thailand (June–September 2025) | Any partner, same format |
 
 : Data used by role. {#tbl-annex-roles}
 
@@ -1191,7 +1192,7 @@ use; it depends on systems that are specific to EUROCONTROL and is not required 
 | European city pairs (6 directions) | 1–14 June 2025 | 950, of which 611 regulated | @sec-eur, @sec-rp4-tests |
 | Reroute sample (10 European study airports) | 1–14 June 2025 | about 2,000 candidates; 100 examined | @sec-eur |
 | International connections (7 partner airports) | 1–7 June 2025 | 1,532 | @sec-intl |
-| Thai contribution | 1 June – 30 September 2025 | about 35,000 | @sec-tha |
+| AEROTHAI contribution | 1 June – 30 September 2025 | about 35,000 | @sec-tha |
 
 : Samples. {#tbl-annex-samples}
 
@@ -1219,6 +1220,7 @@ from the plan.
 |---|---|
 | A40, A100, A200 | Last entry into the 40/100/200 NM ring around the arrival aerodrome |
 | ADS-B | Automatic dependent surveillance – broadcast |
+| AEROTHAI | Aeronautical Radio of Thailand, the air navigation service provider of Thailand |
 | AIBT, ALDT | Actual in-block time, actual landing time |
 | AOBT, ATOT | Actual off-block time, actual take-off time |
 | ANSP | Air navigation service provider |
