@@ -84,6 +84,20 @@ tab_fir_seq <- function(d) {
     summarise(Flights = n(), `Same FIR sequence (%)` = 100 * mean(SEQ_MATCH), .groups = "drop")
 }
 
+# Regulated flights: FIR crossings against the filed and the regulated plan
+tab_fir_refs <- function(d) {
+  x <- d$ct |> filter(REGULATED, MST_CLASS == "fir")
+  seq <- x |> group_by(UID, REF_MODEL) |> summarise(ok = all(STATUS == "delivered"), .groups = "drop") |>
+    group_by(REF_MODEL) |> summarise(`All planned crossings delivered, none added (%)` = 100 * mean(ok))
+  x |> filter(STATUS == "delivered") |>
+    group_by(REF_MODEL) |>
+    summarise(`Crossings delivered` = n(), `Median time offset (min)` = median(DT_MIN), `IQR (min)` = IQR(DT_MIN),
+              `Median position offset (NM)` = median(DPOS_NM, na.rm = TRUE)) |>
+    left_join(seq, by = "REF_MODEL") |>
+    mutate(REF_MODEL = if_else(REF_MODEL == "M1", "filed plan (M1)", "regulated plan (M2)")) |>
+    rename(Reference = REF_MODEL)
+}
+
 # Time offset (vs M1 and M2) along the milestone chain for one flight
 plot_chain <- function(d, id) {
   d$ct |>

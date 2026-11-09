@@ -44,3 +44,21 @@ rtfm_to_profile <- function(x, cols = c(time = "time_over", point = "pt_id", rou
   ) |>
     arrange(FLIGHT_ID, SEQ_ID)
 }
+
+# Airspace profile (rtfm_all_ft_asp_list, exploded) -> same layout as eurocontrol::airspace_profiles_tidy()
+# x: ifps_id, seq, entry_time, asp_id, exit_time, asp_type, entry_geo_pt_id, exit_geo_pt_id,
+#    entry_flt_level, exit_flt_level; key: tibble(ID, IFPS_PLAN_ID)
+# Databricks timestamps are local time (CEST) labelled as UTC: tz_fix_h = 2 for summer dates.
+rtfm_asp_to_profile <- function(x, key, tz_fix_h = 2, types = "FIR") {
+  en <- parse_dms(x$entry_geo_pt_id); ex <- parse_dms(x$exit_geo_pt_id)
+  tibble(ifps_id = x$ifps_id, SEQ_ID = as.integer(x$seq),
+         ENTRY_TIME = lubridate::ymd_hms(x$entry_time, tz = "UTC") + lubridate::hours(tz_fix_h),
+         EXIT_TIME  = lubridate::ymd_hms(x$exit_time, tz = "UTC") + lubridate::hours(tz_fix_h),
+         ENTRY_LAT = en[, "LATITUDE"], ENTRY_LON = en[, "LONGITUDE"], ENTRY_FL = as.numeric(x$entry_flt_level),
+         EXIT_LAT = ex[, "LATITUDE"], EXIT_LON = ex[, "LONGITUDE"], EXIT_FL = as.numeric(x$exit_flt_level),
+         AIRSPACE_ID = x$asp_id, AIRSPACE_TYPE = x$asp_type, MODEL_TYPE = "RTFM") |>
+    filter(AIRSPACE_TYPE %in% types) |>
+    inner_join(key, by = c("ifps_id" = "IFPS_PLAN_ID")) |>
+    select(ID, everything(), -ifps_id) |>
+    arrange(ID, ENTRY_TIME)
+}

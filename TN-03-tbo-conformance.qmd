@@ -877,6 +877,19 @@ On London–Munich the route runs close to several FIR boundaries, so a few naut
 routing change the FIRs crossed. A FIR-sequence mismatch therefore signals a lateral deviation, not its
 size; it should be read together with the cross-track measure.
 
+For regulated flights, the FIR crossings can also be compared with the regulated plan
+(@tbl-eur-fir-refs). The share of flights with exactly the planned sequence is almost the same against
+both references, because regulations rarely changed the route. The time offset at the FIR entries,
+however, drops from a median of about 8 minutes against the filed plan to under 1 minute against the
+regulated plan, consistent with the range rings. FIR entries therefore work as contract points in the
+same way as the rings, and can carry the revision–execution split.
+
+```{r tbl-eur-fir-refs}
+#| label: tbl-eur-fir-refs
+#| tbl-cap: "Regulated flights (611): FIR crossings compared with the filed and the regulated plan."
+tab_fir_refs(d) |> gt_tn()
+```
+
 **Example: AEA36MB, Madrid–Amsterdam, 12 June 2025.** The flight flew 24 NM more than filed. The extra
 distance came from radar vectoring in the last 40 NM before Amsterdam (up to 21 NM cross-track), partly
 offset by a shortcut en route. In time, it was 9 minutes behind the filed plan at the 40 NM ring after
@@ -1161,7 +1174,7 @@ Proposed next steps for the PBWG:
   ring radii, tolerances and aggregation rules;
 - invite partners to contribute **milestone observations** for the study airports in the common
   table format;
-- extend the European demonstration to a **season**, and add FIR crossings for the regulated plan;
+- extend the European demonstration to a **season**;
 - explore **predictability** and **revision history** as data on archived predictions and agreement
   versions become available.
 
