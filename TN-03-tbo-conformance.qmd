@@ -27,6 +27,7 @@ format:
     fig-height: 4
     fig-pos: "H"
     echo: false
+number-sections: true
 execute:
   warning: false
   message: false
@@ -1038,8 +1039,9 @@ each source.
 #| tbl-cap: "Source of the observed 100 NM ring crossing at the partner airport (A100 = arrival from Europe,
 #|   D100 = departure to Europe), share of flights, 1–7 June 2025. No partner data were used in this
 #|   demonstration."
-tab_intl_sources(d) |> gt_tn(groupname_col = "INTL") |> fmt_percent(where(is.double), decimals = 0) |>
-  cols_label(MST = "Ring")
+tab_intl_sources(d) |> select(INTL, MST, OpenSky, `NM surveillance (CPF)`, `NM flown (M3)`, `not observed`) |>
+  gt_tn(groupname_col = NULL) |> fmt_percent(where(is.double), decimals = 0) |>
+  cols_label(INTL = "Partner airport", MST = "Ring")
 ```
 
 Coverage differs strongly between partner airports. Observations exist for nearly all flights at

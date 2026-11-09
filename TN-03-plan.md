@@ -186,6 +186,23 @@ TN's explanatory figures; real flights are combinations of them.
 | 5 | Worked example: one showcase flight, then the pair/direction summaries | figures |
 | 6 | TN-03 qmd (intro, background, concept/methods/data, worked example, discussion toward a PBWG indicator) | html/pdf |
 
+## Status 2026-11-09 – TN-03 wrapped up for PBWG
+
+- `TN-03-tbo-conformance.qmd` (html + pdf, 31 pages) is complete for the PBWG meeting:
+  - key messages and proposed-measures table;
+  - synthetic principles;
+  - vertical-indicator tests H1–H5 on European data;
+  - European city pairs (M1 vs M2 including FIR, revision/execution, reroutes, continuous measures, slot window);
+  - international connections with observation status;
+  - AEROTHAI contribution;
+  - conclusions, appendices (data by role, abbreviations).
+- Companion report `TN-03-internal-processing.qmd`: EUROCONTROL-specific processing, public repo, no secrets.
+- Not pursued before the meeting:
+  - AEROTHAI planned/scheduled times;
+  - Aireon access;
+  - cross-regional weighting (H5, part 2);
+  - seasonal extension.
+
 ## Status 2026-11-05
 
 - Sample: 1–14 June 2025, six pair-directions, 950 flights.
