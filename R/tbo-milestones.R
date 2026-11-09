@@ -53,7 +53,7 @@ ring_milestones <- function(prof, arp = tbo_arp, rings = c(40, 100, 200)) {
 
 # Simple TOC/TOD: first and last point at the maximum flight level of the profile.
 # Placeholder for the VFE algorithm (R/vfe.R); a step climb to a higher level moves TOC.
-toc_tod <- function(prof) {
+mst_toc_tod <- function(prof) {
   prof |>
     group_by(MODEL, ID = FLIGHT_ID) |>
     arrange(TIME_OVER, .by_group = TRUE) |>
@@ -73,7 +73,7 @@ fir_as_milestones <- function(xc) {
 mst_order <- c("D40", "D100", "D200", "TOC", "TOD", "A200", "A100", "A40")
 
 build_milestones <- function(prof, xc) {
-  bind_rows(ring_milestones(prof), toc_tod(prof), fir_as_milestones(xc)) |>
+  bind_rows(ring_milestones(prof), mst_toc_tod(prof), fir_as_milestones(xc)) |>
     arrange(ID, MODEL, TIME)
 }
 
