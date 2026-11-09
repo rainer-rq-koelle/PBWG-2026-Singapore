@@ -160,3 +160,51 @@ tab_intl_fir_obs <- function(d) {
     count(SIDE, STATUS) |>
     pivot_wider(names_from = STATUS, values_from = n, values_fill = 0)
 }
+
+# ---- Partner contribution: Thailand (THA) --------------------------------------------------------
+
+tha_load <- function() read_parquet(tbo_dir("TBO-THA-flights-wide-20250601-20250930.parquet"))
+tha_has_data <- function() file.exists(tbo_dir("TBO-THA-flights-wide-20250601-20250930.parquet"))
+
+tab_tha_overview <- function(th) {
+  th |>
+    filter(FLOW != "other") |>
+    mutate(FLOW = factor(FLOW, c("Thailand–Singapore", "Thailand–Japan", "Thailand domestic"))) |>
+    group_by(FLOW) |>
+    summarise(Flights = n(),
+              `Aerodrome pairs` = n_distinct(paste(ADEP, ADES)),
+              `Departures with ring crossings (%)` = 100 * mean(!is.na(D100[substr(ADEP, 1, 2) == "VT"])),
+              `Arrivals with ring crossings (%)` = 100 * mean(!is.na(A100[substr(ADES, 1, 2) == "VT"])),
+              `In-block time reported (%)` = 100 * mean(!is.na(AIBT[substr(ADES, 1, 2) == "VT"])),
+              .groups = "drop")
+}
+
+# Segment durations at the Thai end of the flight (P15 / median / P85, minutes)
+tab_tha_segments <- function(th) {
+  mins <- \(a, b) as.numeric(difftime(a, b, units = "mins"))
+  th |>
+    filter(FLOW %in% c("Thailand–Singapore", "Thailand–Japan")) |>
+    mutate(`Taxi-out (AOBT–ATOT)` = mins(ATOT, AOBT), `Departure 0–40 NM (ATOT–D40)` = mins(D40, ATOT),
+           `Departure 40–100 NM (D40–D100)` = mins(D100, D40), `Arrival 100–40 NM (A100–A40)` = mins(A40, A100),
+           `Arrival 40 NM–landing (A40–ALDT)` = mins(ALDT, A40), `Taxi-in (ALDT–AIBT)` = mins(AIBT, ALDT)) |>
+    pivot_longer(c(starts_with("Taxi"), starts_with("Departure"), starts_with("Arrival")), names_to = "Segment", values_to = "MIN") |>
+    filter(!is.na(MIN), MIN > 0, MIN < 120) |>
+    mutate(Segment = factor(Segment, c("Taxi-out (AOBT–ATOT)", "Departure 0–40 NM (ATOT–D40)", "Departure 40–100 NM (D40–D100)",
+                                       "Arrival 100–40 NM (A100–A40)", "Arrival 40 NM–landing (A40–ALDT)", "Taxi-in (ALDT–AIBT)"))) |>
+    group_by(FLOW, Segment) |>
+    summarise(n = n(), P15 = quantile(MIN, .15), Median = median(MIN), P85 = quantile(MIN, .85), .groups = "drop")
+}
+
+plot_tha_arrival <- function(th) {
+  mins <- \(a, b) as.numeric(difftime(a, b, units = "mins"))
+  th |>
+    filter(FLOW %in% c("Thailand–Singapore", "Thailand–Japan"), substr(ADES, 1, 2) == "VT") |>
+    transmute(FLOW, ADES, `100–40 NM` = mins(A40, A100), `40 NM–landing` = mins(ALDT, A40)) |>
+    pivot_longer(-c(FLOW, ADES), names_to = "Segment", values_to = "MIN") |>
+    filter(!is.na(MIN), MIN > 0, MIN < 60) |>
+    ggplot(aes(MIN, colour = ADES)) +
+    geom_density() +
+    facet_grid(FLOW ~ Segment) +
+    labs(x = "duration (min)", y = NULL, colour = "Arrival aerodrome") +
+    theme(legend.position = "bottom", axis.text.y = element_blank())
+}

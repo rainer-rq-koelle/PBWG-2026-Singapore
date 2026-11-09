@@ -911,6 +911,77 @@ allow the same milestone measures along the whole route.
 tab_intl_fir_obs(d) |> gt_tn(groupname_col = NULL) |> cols_label(SIDE = "")
 ```
 
+### A partner contribution: milestones from Thailand {#sec-tha}
+
+```{r tha-load}
+#| include: false
+has_tha <- tha_has_data()
+if (has_tha) th <- tha_load()
+```
+
+During the preparation of this note, Thailand contributed milestone data for flights to and from its
+airports, covering connections with Singapore and Japan as well as Thai domestic flights, for June to
+September 2025. The data were provided in the PBWG milestone format used in this note: off-block,
+take-off, range-ring crossings at 40 and 100 NM, landing and in-block, each with time and, for the
+ring crossings, position and altitude. They could therefore be used without conversion.
+
+The contribution shows what partner data add to the approach. The European sample observes flights
+from the European side; the Thai data observe the other end of the flight, at Bangkok Suvarnabhumi
+(VTBS) and Don Mueang (VTBD), with the same milestones and definitions (@tbl-tha-overview). The ring
+crossings lie on the 40 and 100 NM radii to within a fraction of a nautical mile, so they can be used
+directly as contract points.
+
+```{r tbl-tha-overview}
+#| label: tbl-tha-overview
+#| tbl-cap: "Milestone data contributed by Thailand, 1 June – 30 September 2025. Shares refer to the Thai
+#|   end of the flight."
+#| eval: !expr has_ops && has_tha
+tab_tha_overview(th) |> rename(Flow = FLOW) |> gt_tn()
+```
+
+For the international flows, the data describe the Thai part of each flight: the departure from
+Thailand from off-block to the 100 NM ring, and the arrival in Thailand from the 100 NM ring to
+in-block. @tbl-tha-segments summarises the duration of each segment. These durations are the building
+blocks for the time offsets of this note: once a reference time is available for the same milestones,
+for example from the filed plan, each segment yields a time offset in the same way as the European
+range rings.
+
+```{r tbl-tha-segments}
+#| label: tbl-tha-segments
+#| tbl-cap: "Duration of the departure and arrival segments at the Thai end of the flight (minutes, 15th
+#|   percentile, median, 85th percentile), June – September 2025."
+#| eval: !expr has_ops && has_tha
+tab_tha_segments(th) |> gt_tn(groupname_col = "FLOW")
+```
+
+Two observations illustrate what the data can show. First, the segment from the 100 NM ring to the
+40 NM ring is short and stable for both flows (median about 9–10 minutes). Second, the segment from the
+40 NM ring to landing is longer for arrivals from Singapore (median 19.5 minutes) than from Japan
+(15 minutes) (@fig-tha-arrival). This is the terminal part of the arrival, where sequencing takes place.
+The difference between flows is a first indication of where arrival management absorbs time, and
+of where a time constraint agreed in a TBO environment would need to be delivered.
+
+```{r fig-tha-arrival}
+#| label: fig-tha-arrival
+#| fig-cap: "Arrivals in Thailand: duration of the 100–40 NM segment and of the 40 NM-to-landing
+#|   segment, by flow and arrival aerodrome. Data contributed by Thailand."
+#| fig-height: 4
+#| eval: !expr has_ops && has_tha
+plot_tha_arrival(th)
+```
+
+**Example: SIA720, Singapore–Bangkok (A350).** A typical arrival: the aircraft crossed the 100 NM ring,
+reached the 40 NM ring about 9 minutes later, landed about 20 minutes after that and was in-block about
+9 minutes after landing. Each of these times is an observed contract point at the Thai end. Combined
+with a reference trajectory for the same flight, they give the arrival-side time offsets that the
+European record cannot observe.
+
+The contributed period does not overlap with flights between Europe and Thailand in this note's
+international sample, so the data are not yet joined to the European records. The structure is
+nevertheless identical. The same contribution for flights to and from Europe would close the gap at
+Bangkok shown in @tbl-intl-sources, where many departures to Europe are currently not observed from
+European sources.
+
 ### What the international examples show
 
 - The method transfers unchanged: the same milestones, the same contract table and the same measures.
@@ -937,7 +1008,9 @@ performance perspective, and to test a practical approach on synthetic and real 
    out of delivery statistics, so that missing observations are visible rather than hidden.
 5. **Partners can close the gaps directly.** Milestone times at the partner end (ring crossings, FIR
    entries, landing and in-block) are sufficient to extend the European demonstration to full
-   origin–destination coverage.
+   origin–destination coverage. The contribution from Thailand (@sec-tha) shows that the format works
+   as intended: the data could be used without conversion and describe the arrival and departure
+   segments at the partner end with the same milestones.
 
 Proposed next steps for the PBWG:
 
