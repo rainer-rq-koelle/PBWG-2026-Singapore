@@ -957,9 +957,11 @@ tab_tha_segments(th) |> gt_tn(groupname_col = "FLOW")
 Two observations illustrate what the data can show. First, the segment from the 100 NM ring to the
 40 NM ring is short and stable for both flows (median about 9–10 minutes). Second, the segment from the
 40 NM ring to landing is longer for arrivals from Singapore (median 19.5 minutes) than from Japan
-(15 minutes) (@fig-tha-arrival). This is the terminal part of the arrival, where sequencing takes place.
-The difference between flows is a first indication of where arrival management absorbs time, and
-of where a time constraint agreed in a TBO environment would need to be delivered.
+(15 minutes) (@fig-tha-arrival). The figure also shows a difference between the two Bangkok airports for
+arrivals from Japan: at Don Mueang most flights land about 11 minutes after the 40 NM ring, while at
+Suvarnabhumi the distribution is wider. This is the terminal part of the arrival, where sequencing takes
+place. Differences between flows and aerodromes are a first indication of where arrival management
+absorbs time, and of where a time constraint agreed in a TBO environment would need to be delivered.
 
 ```{r fig-tha-arrival}
 #| label: fig-tha-arrival
