@@ -1,0 +1,79 @@
+---
+title: "TN-03 – EUROCONTROL data processing (companion report)"
+subtitle: "Companion to Technical Note 03 – EUROCONTROL-specific processing; may not apply elsewhere"
+author: "Performance Review Unit"
+date: today
+format:
+  html:
+    toc: true
+    embed-resources: true
+---
+
+::: {.callout-note}
+This report records how the European data used in TN-03 were extracted and prepared at EUROCONTROL.
+It refers to EUROCONTROL systems and access arrangements that do not exist elsewhere. It documents the
+processing for reproducibility; it is not part of the method proposed to the PBWG, and partners do not
+need these systems to apply the method.
+:::
+
+## Data sources
+
+| Content in TN-03 | Internal source | Access | Notes |
+|---|---|---|---|
+| Flight list, ATFM delay, slot times (EOBT, COBT, AOBT), requested flight level | PRISME `FLX.FLIGHT`, `SWH_FCT.FAC_FLIGHT` via `eurocontrol::flights_tidy()` | Oracle (ROracle), account PRU_READ / PRU_DEV | Key `ID` = SAM_ID |
+| Filed (Model 1) and flown (Model 3) point profiles | PRISME `FSD.ALL_FT_POINT_PROFILE` (FTFM, CTFM) via `eurocontrol::point_profiles_tidy()` | as above | CPF also used (correlated position) |
+| FIR crossings, Model 1 / Model 3 | NM airspace profiles via `eurocontrol::airspace_profiles_tidy(airspace = "FIR")` | as above | FIR and UIR merged by 4-letter region |
+| Regulated (Model 2) point profiles | Databricks data product `dp_all_ft_flights / output_flights` v1.0.0, column `rtfm_all_ft_pt_list` | Databricks (Collibra-registered data product) | Not loaded in PRISME (RTFM absent 2023–2026) |
+| Reroute scan (Model 1 vs Model 2) | same data product (`ftfm_field15`, `rtfm_field15`, point lists) | Databricks | computed in Databricks, one row per flight |
+| Ring crossings at non-European airports | OPDI flight list (OpenSky Network), `C40_*`, `C100_*` | local parquet extract (TN-01) | no 200 NM ring |
+| Thai milestones | Partner contribution (THA), PBWG milestone format | file received 2026-11-09 | June–September 2025 |
+
+## Linkage
+
+- PRISME flights are keyed by `ID` (SAM_ID). The Databricks data product uses its own `flight_id`;
+  the link is `ifps_id` = PRISME `IFPS_PLAN_ID` (unique for all sample flights).
+- Latest version per flight in Databricks: highest `version_date`, then `flight_version_nr`.
+- OpenSky segments are linked by ICAO 24-bit address and overlap with the NM flight window; a ring time
+  is accepted only inside [AOBT − 30 min, landing + 30 min].
+
+## Corrections applied
+
+| Issue | Evidence | Correction |
+|---|---|---|
+| Databricks timestamps are local time (CEST) labelled as UTC ("Z") | `lobt`, `cobt` exactly 120 min earlier than PRISME for all 99 linked flights | +2 h (valid for summer time only; winter data need a time-zone-aware conversion) |
+| Databricks `atfm_delay` in seconds | values 300, 900, 3540 vs PRISME minutes | divide by 60 |
+| Databricks `pt_dist` in km | EBCI–LGAV: 2,293 vs 2,077 km great circle | not used for distances |
+| PRISME timestamps without time-zone attribute | R session time zone Europe/Paris | `force_tz(UTC)` on every read |
+
+## Extraction procedure (Databricks)
+
+File writes are not permitted in the Databricks workspace and the result preview is limited to about
+10,000 rows. Extracts were therefore run in chunks and downloaded from the result preview:
+
+1. Model 2 points for the 611 regulated sample flights: 7 chunks of 80 flights
+   (`data/tbo/databricks_rtfm_chunks.py`).
+2. Reroute scan: aggregated in Databricks, one row per flight (`data/tbo/databricks_reroute_scan.py`).
+3. Model 2 points for the 100-flight reroute sample (`data/tbo/databricks_reroute_showcase.py`).
+4. Model 2 FIR list (`rtfm_all_ft_asp_list`, filtered to `asp_type = FIR`): 5 chunks (`data/tbo/databricks_rtfm_asp_chunks.py`), 611 flights, 4,352 FIR records.
+
+The generated cells contain flight identifiers and are kept local (`data/tbo/`, not tracked).
+
+## Not used
+
+- Aireon space-based ADS-B (Hive / Cloudera): access returned HTTP 401 at the time of the analysis;
+  script `python/aireon_trial.py` retained for a later trial.
+- OPDI flight events: end 2025-06-13, therefore not used for the period.
+
+## Local data products (`data/tbo/`, not tracked)
+
+| File | Content |
+|---|---|
+| `TBO-dev-flights-*.parquet` | European sample flights (950) |
+| `TBO-dev-profiles-M123-*.parquet` | Model 1/2/3 point profiles |
+| `TBO-M2-RTFM-*.parquet` | Model 2 profiles (time-corrected) |
+| `TBO-contract-dev-M1M2-*.parquet` | contract table, both references |
+| `TBO-dev-conformance-M1M2-*.parquet` | continuous measures per flight and reference |
+| `TBO-M123-ring-decomposition-*.parquet` | revision / execution split |
+| `TBO-reroute-*.parquet` | reroute scan, sample profiles, delivery |
+| `TBO-contract-INTL-*.parquet`, `TBO-intl-*.parquet` | international sample |
+| `TBO-THA-flights-wide-*.parquet` | Thai contribution, one row per flight |

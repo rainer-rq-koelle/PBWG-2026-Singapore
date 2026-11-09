@@ -307,3 +307,42 @@ plot_profile_flight <- function(pf) {
     labs(x = "distance along the reference (NM)", y = NULL, colour = NULL) +
     theme(legend.position = "bottom")
 }
+
+# H5: sensitivity of the vertical shares to band width and weighting (filed plan as reference)
+h5_load <- function() {
+  read_parquet(tbo_dir("TBO-dev-vertical-grid-M1-20250601-20250614.parquet")) |>
+    left_join(read_parquet(tbo_dir("TBO-dev-flights-20250601-20250614.parquet")) |> select(ID, PAIR), by = "ID")
+}
+
+h5_shares <- function(vg, bands_fl = c(5, 10, 20)) {
+  purrr::map(bands_fl, \(b) vg |>
+    group_by(PAIR, ID) |>
+    summarise(n = n(), sym_n = sum(abs(dfl) < b, na.rm = TRUE), rp4_n = sum(dfl > -b, na.rm = TRUE), .groups = "drop") |>
+    group_by(PAIR) |>
+    summarise(`Symmetric, flight-weighted` = mean(sym_n / n), `Symmetric, distance-weighted` = sum(sym_n) / sum(n),
+              `Within or above, flight-weighted` = mean(rp4_n / n), `Within or above, distance-weighted` = sum(rp4_n) / sum(n),
+              .groups = "drop") |>
+    mutate(Band = paste0("±", format(b * 100, big.mark = ","), " ft"))) |>
+    purrr::list_rbind()
+}
+
+tab_h5 <- function(vg) {
+  h5_shares(vg) |>
+    select(Band, PAIR, `Symmetric, distance-weighted`, `Within or above, distance-weighted`) |>
+    pivot_longer(-c(Band, PAIR), names_to = "Share") |>
+    mutate(Share = sub(", distance-weighted", "", Share)) |>
+    pivot_wider(names_from = Band, values_from = value) |>
+    arrange(Share, factor(PAIR, pair_levels)) |>
+    rename(`Airport pair` = PAIR)
+}
+
+# Rank of each pair (1 = best) under each setting; returns the number of distinct rankings per share
+h5_rank_changes <- function(vg) {
+  h5_shares(vg) |>
+    pivot_longer(-c(PAIR, Band), names_to = "Setting") |>
+    mutate(Share = if_else(grepl("^Symmetric", Setting), "Symmetric", "Within or above")) |>
+    group_by(Share, Band, Setting) |>
+    mutate(rank = rank(-value)) |>
+    group_by(Share, PAIR) |>
+    summarise(min_rank = min(rank), max_rank = max(rank), .groups = "drop")
+}

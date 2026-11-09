@@ -90,7 +90,7 @@ gt_tn <- function(x, ...) gt(x, ...) |> fmt_number(where(is.double), decimals = 
 | Lateral | Distance difference flown, split into departure, en route and arrival | as above | synthetic; @sec-eur-cont |
 | Lateral | FIR sequence match | FIR crossings | synthetic; @sec-eur |
 | Lateral | Reroute (revised plan > 5 NM from filed plan en route) | two reference versions | @sec-eur |
-| Vertical | Level offset; share within ±1,000 ft; share within or above | reference and observed levels | synthetic; @sec-rp4-tests |
+| Vertical | Level offset; share within a stated band (±1,000 ft here); share within or above | reference and observed levels | synthetic; @sec-rp4-tests (incl. band sensitivity) |
 | Vertical | Distance cruised below the requested level; TOC/TOD offsets | requested level; trajectories | synthetic; @sec-rp4-tests |
 | Observation | Observation status per milestone; coverage of the en-route grid | source of each observed value | @sec-eur-cont; @sec-intl |
 
@@ -676,7 +676,7 @@ The first results support H1 and qualify H2 to H4:
 - **H4 – confirmed.** Among flights with a "within or above" share of at least 0.85, the top-of-descent
   offset still ranges from about −3 to +23 minutes (10th to 90th percentile). The share says nothing about
   when the descent took place.
-- **H5** (band width and weighting) has not yet been tested.
+- **H5 – partly confirmed.** The symmetric share and the ranking of flows depend on the band width; the weighting matters only across flows of different length (see below).
 
 **H3 – revisions.** The indicator compares the flight with the last filed plan. Where a revised
 trajectory changes the planned level, a flight that follows its revision exactly can score poorly, and
@@ -696,6 +696,31 @@ recomputes the indicator under alternative conventions and checks whether conclu
 in particular rankings between flows, airports or regions. An indicator whose ranking depends on the
 band width or on the weighting is unsuitable for comparison across regions with different traffic
 mixes and flight lengths.
+
+@tbl-h5 shows both shares for the six European flows with bands of ±500, ±1,000 and ±2,000 ft.
+
+```{r tbl-h5}
+#| label: tbl-h5
+#| tbl-cap: "H5: vertical shares against the filed plan for three band widths, distance-weighted, en route,
+#|   European sample (950 flights)."
+#| eval: !expr has_ops
+tab_h5(h5_load()) |> gt_tn(groupname_col = "Share") |> fmt_number(where(is.double), decimals = 2)
+```
+
+The results answer H5 in two parts:
+
+- **Weighting.** Within a flow, flight-weighted and distance-weighted shares differ by at most 0.03,
+  because the flights of a flow have similar lengths. The weighting matters only when flows of different
+  length are pooled, which is the cross-regional case. It cannot be tested within this sample and
+  remains a requirement for the measurement specification.
+- **Band width.** The symmetric share depends strongly on the band: it rises by 0.10 to 0.20 between
+  ±500 and ±2,000 ft, and the ranking of the flows changes. London–Munich is always last, but Munich–London
+  moves from third place with the narrow band to first place with the wide band. The "within or above"
+  share is less sensitive, because it already accepts all flight above the plan, and its ranking is
+  stable except for one swap between neighbouring flows.
+
+A vertical adherence share is therefore only comparable between regions if the band is part of the
+specification and reported with the result.
 
 **Global relevance.** The hypotheses matter most for comparison across regions. Three conditions vary
 between regions and interact with the indicator's design:
@@ -1188,6 +1213,7 @@ airports, and the OpenSky Network for the open surveillance data used at the par
 This appendix describes the data used in this note by **role**, so that partners can map them to
 their own data holdings. How the European data were extracted is documented separately for internal
 use; it depends on systems that are specific to EUROCONTROL and is not required to apply the method.
+It is available as a companion report in the project repository (`TN-03-internal-processing.qmd`).
 
 | Role | Content | European demonstration | Partner equivalent |
 |---|---|---|---|
