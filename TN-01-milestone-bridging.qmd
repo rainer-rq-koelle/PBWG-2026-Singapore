@@ -11,11 +11,47 @@ format:
     code-tools: true
     df-print: paged
     embed-resources: true
+  pdf:
+    documentclass: scrartcl
+    papersize: a4
+    geometry: [margin=2cm]
+    fontsize: 10pt
+    mainfont: Calibri
+    monofont: Consolas
+    toc: true
+    toc-depth: 2
+    colorlinks: true
+    fig-width: 7
+    fig-height: 4
+    fig-pos: "H"
+    include-in-header:
+      text: |
+        \usepackage{float}
+        \floatplacement{table}{H}
+    echo: false
+pdf-engine: lualatex
 editor: visual
 execute:
   warning: false
   message: false
 ---
+
+## Key Messages
+
+-   **No single source observes an intercontinental flight from off-block to in-block.** European airport data, partner data and open ADS-B data (OpenSky Network, OSN) each cover a part. Linked, they cover the full AOBT → AIBT sequence for most flights.
+-   **The PBWG analytic milestone dataset** keeps all milestones of all sources, linked to the same physical flight, with every row traceable to its source. It is the common first layer for the PBWG work threads: turnaround and delay propagation (TN-02), trajectory-based operations (TN-03) and vertical flight efficiency (chapter 8).
+-   **Partner data fill the gaps that open data cannot.** Near Brazilian, Chinese and South African airports, OSN rarely sees block times and often misses runway times. Partner data provide exactly these.
+-   **AEROTHAI data show the approach between two non-European regions** (section 7.5): linked to the OSN reconstruction of Thailand–Singapore and Thailand–Japan flights, they complete the Thai end of practically every flight.
+-   **PBWG members can complement the dataset** by providing their milestone lists in the PBWG milestone-table format. Aircraft identity (registration or ICAO 24-bit address) and runway/ring times make linkage robust.
+
+| Layer / element | What the note delivers | Where shown |
+|------------------------|------------------------|------------------------|
+| Analytic milestone dataset | All milestones of all sources per flight, no de-duplication, `UID` + `MATCH` | Chapters 3–4 |
+| Fields | PBWG milestone table: `FLTID, REG, TYPE, ICAO24, ADEP, ADES, MST, MST_LBL, TIME, LAT, LON, ALT, SOURCE, SOURCE_ID, CONF` | Section 1, Appendix A |
+| Sources | European airport data (APDF), partner data (BRA, CHN, THA), OSN | Chapters 1, 5, 7 |
+| Linkage | Reference records → flights; OSN segments by ICAO24 + time window; OSN-only chaining for non-European pairs | Chapters 3, 7 |
+| Characterisation | Completeness, OSN coverage at partner airports, runway-time agreement | Chapter 5, section 7.5 |
+| Application example | Vertical flight efficiency at eight PBWG airports (exploratory) | Chapter 8 |
 
 ## Summary
 
@@ -182,16 +218,11 @@ The partner data can cover a wider network (the Brazil package has 16 Brazilian 
 
 The datasets are built by `R/build-analytic.R` using the functions in `R/analytic_merge.R`.
 
-```{mermaid}
-flowchart LR
-  A[APDF records<br/>-DEP / -ARR] --> C[1. Link reference<br/>records into flights<br/>UID]
-  B[Partner records<br/>-DEP / -ARR] --> C
-  C --> D[2. Link OSN<br/>flight-list segments]
-  E[OSN flight list] --> D
-  D --> F[3. Add all events of<br/>linked segments]
-  G[OSN flight events] --> F
-  F --> H[Analytic milestone<br/>dataset]
-```
+| Step | Input | Output |
+|------------------------|------------------------|------------------------|
+| 1\. Link reference records into flights | APDF and partner records (`-DEP` / `-ARR`) | Flights with `UID` |
+| 2\. Link OSN flight-list segments | Flights, OSN flight list | Segments per flight |
+| 3\. Add all events of linked segments | OSN flight events | Analytic milestone dataset |
 
 **Step 1: reference records → flights.** Out-of-area rows are set aside; they follow their in-area record in step 3. A departure-side record (`-DEP`) and an arrival-side record (`-ARR`) belong to the same flight if:
 
@@ -232,12 +263,9 @@ list(
   gt()
 ```
 
-This approach is based on the limited sample size. Conceptually, a series of "bridging" test an be developed to link "aircraft leaving one area/region" and "entering another region". Conceptually, a trajectory is a series of time ordered points. Particularly in the context of international flights. This enables to work with a "rough" flight time "window". \
-It must be noted that for this iteration, the exclusive time window consistency worked well.\
-The window approach cannot however, detect any interim stop or flag detours.
+The parameters were set on the current sample. Because a trajectory is a time-ordered series of points, a flight leaving one region and entering another can be linked with a coarse block-time window, and for this sample the window approach worked well. It cannot, however, detect intermediate stops or flag detours.
 
-\
-Future work will have to consider entry/exit relationships between segments associated with the same flight. However, there is a trade-off in terms of sophistication of the matching/bridging algorithm(s). It is anticipated that a higher level of coverage, i.e., more segments, reduces the uncertainty of the matching/bridging.
+Future work can add exit/entry relationships between the segments of the same flight (e.g. region exit and entry points). There is a trade-off between the sophistication of the linkage and its robustness; more segments from more sources are expected to reduce the uncertainty of the linkage.
 
 ## 4. Examples
 
@@ -471,7 +499,7 @@ agreement_table(bra$ms)
 linkage_table(chn$flights)
 ```
 
-About 85% of the flights in the APDF scope are linked at both ends. For the remainder, the merged dataset currently holds the European record; these flights can be completed with a future data release.
+About `r round(100 * mean(chn$flights$LINK == "dep+arr"))`% of the flights in the APDF scope are linked at both ends. For the remainder, the merged dataset currently holds the European record; these flights can be completed with a future data release.
 
 #### Milestone completeness
 
@@ -669,6 +697,54 @@ The Delta flight from Tokyo Haneda to Atlanta is observed in three OSN segments 
 -   **Arrival at KATL:** TOD, A100, A40 and the landing on runway 08L.
 
 The two gaps (up to `r ju_fl$MAX_GAP_MIN[ju_fl$UID == ex_intl]` min) lie over the Pacific. The `AOBT`/`AIBT` events are OSN block events that are not reliable here: the `AIBT` a few minutes after take-off at RJTT and the `AOBT` in the third segment are artefacts of the stand detection (section 6), which the payload layer has to filter. Block and schedule times from Japan and the United States would complete the flight from AOBT to AIBT.
+
+### 7.5 Partner contribution: AEROTHAI (Thailand)
+
+AEROTHAI (Aeronautical Radio of Thailand, the air navigation service provider of Thailand) contributed milestones in the PBWG milestone-table format for Thai domestic flights and for flights between Thailand and Singapore and Japan, June–September 2025. This is the first partner contribution between two non-European PBWG regions. It shows how partner data complete the OSN baseline of section 7.
+
+```{r tha-setup}
+source(here("R", "tha-partner.R"))
+tha <- tha_read()
+tha_lk <- tha_link_osn(tha)
+```
+
+The file contains `r format(n_distinct(tha$SOURCE_ID), big.mark = ",")` flights with the milestones AOBT, ATOT, D40, D100, A100, A40, ALDT and AIBT, i.e. the Thai end of each flight, including runway and stand labels and ring-crossing positions. Each record covers the end of the flight in Thailand; for domestic flights both ends are covered.
+
+```{r tha-completeness}
+#| tbl-cap: "AEROTHAI milestones: share of flights per milestone and flow, June–September 2025"
+tha_completeness(tha) |>
+  filter(FLOW != "other") |>
+  gt() |>
+  fmt_integer(flights) |>
+  fmt_percent(-c(FLOW, flights), decimals = 0) |>
+  sub_missing(missing_text = "–") |>
+  cols_label(FLOW = "Flow", flights = "Flights")
+```
+
+For international flights, about half of the records describe a departure from Thailand (AOBT, ATOT, D40, D100) and half an arrival in Thailand (A100, A40, ALDT, AIBT). Stand times (AOBT/AIBT) are provided for practically all records with the respective end.
+
+**Linkage.** The file carries the aircraft identification but no registration or ICAO 24-bit address. The records are therefore linked to the OSN-reconstructed flights of section 7 by aircraft identification, airport pair and time (partner ATOT vs first OSN observation for departures from Thailand, partner ALDT vs last OSN observation for arrivals; ±90 min; one-to-one only). For 1–13 June 2025, `r nrow(tha_lk$link)` of the `r nrow(tha_lk$osn)` OSN flights between Thailand and Singapore or Japan (`r round(100 * nrow(tha_lk$link) / nrow(tha_lk$osn))`%) link to an AEROTHAI record. The median time difference of the link is below one minute.
+
+```{r tha-coverage}
+#| tbl-cap: "Milestones at the Thai end of linked Thailand–Singapore/Japan flights: OSN alone, AEROTHAI, merged (1–13 June 2025)"
+tha_osn_coverage(tha, tha_lk$link) |>
+  mutate(THAI_END = if_else(THAI_END == "departure", "Departure from Thailand", "Arrival in Thailand")) |>
+  gt(groupname_col = "THAI_END") |>
+  fmt_percent(c(OSN, AEROTHAI, merged), decimals = 0) |>
+  cols_label(MST = "Milestone", flights = "Flights", merged = "Any source")
+```
+
+```{r tha-agreement}
+#| tbl-cap: "Runway-time agreement at the Thai end, OSN − AEROTHAI (s)"
+tha_agreement(tha, tha_lk$link) |>
+  gt() |>
+  fmt_number(ends_with("_s"), decimals = 0) |>
+  cols_label(MST = "Milestone", median_s = "Median (s)", p05_s = "5th pct (s)", p95_s = "95th pct (s)")
+```
+
+-   **Complementarity.** OSN observes the airborne milestones near Bangkok well, but block times for only about a quarter to a third of the flights. AEROTHAI provides the stand times (AOBT/AIBT) for practically all of them, so that the Thai end is complete.
+-   **Agreement.** Runway times agree within about half a minute. OSN take-off times are consistently about 30 s after the AEROTHAI ATOT, OSN landing times a few seconds before ALDT. These are systematic definition differences between the two sources (e.g. the point on the runway at which the event is detected), not linkage errors, and could be addressed in the payload layer.
+-   **Scope for extension.** The file contains actual times only. Scheduled times (SOBT/SIBT) would open punctuality and delay analyses, and registration or ICAO 24-bit address would allow linking consecutive flights of the same aircraft (turnarounds, TN-02). Both can be added with a future release; the format already provides the fields.
 
 ## 8. Worked Example: Vertical Flight Efficiency (Exploratory)
 
@@ -879,7 +955,9 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 -   [ ] Add D200/A200 crossings to the OPDI flight events (OSN data engineering)
 -   [ ] Discuss with the partners whether ring crossings (40/100 NM) can be included in future releases
 -   [ ] Agree PBWG codes for the remaining OSN events (50/60/110/120 NM rings, runway and surface events)
--   [ ] Apply to the Singapore partner data
+-   [x] First partner data between two non-European regions: AEROTHAI (Thailand–Singapore/Japan, section 7.5)
+-   [ ] Link the AEROTHAI data also to Thai domestic flights and the full June–September period
+-   [ ] Apply to Singapore partner data, once available (both ends of Thailand–Singapore flights)
 -   [ ] South Africa: integrate partner data for FAOR, FACT, FALE once available
 -   [x] Build APDF + OSN datasets for the remaining region pairs (USA, CAN, SIN, JPN, THA)
 -   [ ] Add the APDF + OSN region pairs to the data characterisation (chapter 5)
@@ -888,7 +966,47 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 -   [ ] VFE: discuss band breakdown and cohort definition in the group; add supplementary measures (e.g. level segment duration distribution, level altitudes)
 -   [ ] VFE: follow up the OSN data-engineering items with the OPDI data engineer
 
-## Appendix: Files
+## Acknowledgement {.unnumbered}
+
+The authors thank DECEA (Department of Airspace Control, Brazil), CAAC (Civil Aviation Administration of China) and CAUC (Civil Aviation University of China), and AEROTHAI (Aeronautical Radio of Thailand) for their milestone data and support, and the OpenSky Network for the open ADS-B data and the OPDI flight lists and events.
+
+## Appendix A: Data Used by Role
+
+| Role | Source | Milestones | Identity fields | Period used |
+|------------------------|------------------------|------------------------|------------------------|------------------------|
+| European end (reference) | European airport operator data (APDF) with ring crossings | SOBT, AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT, SIBT | FLTID, REG, ICAO24, ADEP, ADES | 1–14 June 2025 |
+| Partner end (reference) | Brazil (DECEA) | SOBT, AOBT, ATOT, A100, A40, ALDT, AIBT, SIBT | FLTID, REG, ICAO24 | 1–14 June 2025 |
+| Partner end (reference) | China (CAAC, CAUC) | SOBT, AOBT, ATOT, ALDT, AIBT, SIBT | FLTID, REG (ICAO24 added) | 1–14 June 2025 |
+| Partner end (reference) | AEROTHAI (Thailand) | AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT | FLTID | June–September 2025 (linkage: 1–13 June) |
+| Open observation | OSN / OPDI flight list and events | runway, ring, flight-level, level and surface events | ICAO24, callsign | 1–14 June 2025 (events to 13 June) |
+
+## Appendix B: Abbreviations
+
+| Abbreviation | Meaning |
+|------------------------------------|------------------------------------|
+| ADEP / ADES | Aerodrome of departure / destination |
+| AOBT / AIBT | Actual off-block / in-block time |
+| APDF | Airport operator data flow (European airport data) |
+| ARP | Aerodrome reference point |
+| ASMA / DSMA | Additional time in the arrival / departure sequencing and metering area |
+| ATOT / ALDT | Actual take-off / landing time |
+| CCO / CDO | Continuous climb / descent operations |
+| D40, D100 / A40, A100 | Crossing of the 40/100 NM ring around the departure / arrival airport |
+| ICAO24 | ICAO 24-bit aircraft address |
+| OPDI | Open Performance Data Initiative (flight lists and events derived from OSN) |
+| OSN | OpenSky Network |
+| PBWG | Performance Benchmarking Working Group |
+| SOBT / SIBT | Scheduled off-block / in-block time |
+| TOC / TOD | Top of climb / descent |
+| UID | Flight identifier in the analytic dataset |
+| VFE | Vertical flight efficiency |
+
+## Appendix C: EUROCONTROL-specific Processing and Files
+
+This appendix applies only to the EUROCONTROL internal processing. The data environments of other PBWG members differ and will face other issues.
+
+-   The European APDF records carry the airport-provided flight identifier. Where an APDF record links uniquely to the flight plan, the filed aircraft identification is used as `FLTID`.
+-   The European D40/D100/A40/A100 are derived from the Network Manager trajectory (a model), not from surveillance.
 
 | File | Content |
 |------------------------------------|------------------------------------|
@@ -900,6 +1018,7 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 | `R/vfe.R`, `R/build-vfe.R` | VFE functions and build script |
 | `R/international.R`, `R/build-international.R` | International region pairs (OSN only): chaining, pair datasets, packages |
 | `R/build-share-packages.R` | Partner data packages for the European region pairs |
+| `R/tha-partner.R` | AEROTHAI data: completeness, linkage to OSN, agreement |
 | `data/ref-airports-ARP.csv` | Airport reference points (OurAirports) |
 | `data/ref-pbwg-airports.csv` | PBWG partner airports with reference points (OurAirports) |
 | `data/EUR-<XXX>-milestone-EUR<XXX>OSN-20250601-20250614.csv` | Analytic milestone dataset (PBWG milestone-table format plus `UID` and `MATCH`) |
@@ -917,3 +1036,4 @@ read_csv(vfe_file("issues"), show_col_types = FALSE) |>
 -   2026-10-28: Exploratory VFE worked example for eight PBWG reference airports
 -   2026-11-04: EUR–ZAF (APDF + OSN) added; FLTID convention (ICAO Doc 4444 aircraft identification)
 -   2026-11-04: International flights between PBWG regions (OSN only), chapter 7
+-   2026-11-09: PBWG meeting version: key messages, AEROTHAI contribution (7.5), appendices, PDF

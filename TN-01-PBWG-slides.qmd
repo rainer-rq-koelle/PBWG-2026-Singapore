@@ -1,0 +1,263 @@
+---
+title: "A PBWG study dataset"
+subtitle: "Merging milestone data for international flights (TN-01)"
+author: "EUROCONTROL Performance Review Unit"
+date: "PBWG, November 2026"
+format:
+  pptx:
+    reference-doc: assets/PBWG-tmpl.pptx
+    fig-width: 9
+    fig-height: 4.2
+    fig-dpi: 150
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(here)
+source(here("R", "analytic_merge.R"))
+source(here("R", "tha-partner.R"))
+theme_set(theme_gray(base_size = 16))
+read_region <- function(region) {
+  tag <- sprintf("EUR-%s-%%s-EUR%sOSN-20250601-20250614.csv", region, region)
+  list(flights = read_csv(here("data", sprintf(tag, "flights")), show_col_types = FALSE),
+       ms = read_milestones(here("data", sprintf(tag, "milestone"))))
+}
+bra <- read_region("BRA"); chn <- read_region("CHN"); zaf <- read_region("ZAF")
+tha <- tha_read(); tha_lk <- tha_link_osn(tha)
+core_mst <- c("SOBT", "AOBT", "ATOT", "D40", "D100", "A100", "A40", "ALDT", "AIBT", "SIBT")
+hide_mst <- "^LVL|^FL\\d|^[AD](50|60|110|120)$|taxiway|parking|apron"
+tb <- function(x, n = 0) flextable::flextable(mutate(x, across(where(is.double), \(v) round(v, n)))) |>
+  flextable::fontsize(size = 12, part = "all") |> flextable::autofit()
+pc <- \(x) scales::percent(x, accuracy = 1)
+```
+
+## Why we are here
+
+- PBWG compares operational performance **across regions**.
+- International flights connect the regions – but **no single source** observes them from off-block to in-block.
+- TN-01 shows how to merge the pieces into one **analytic milestone dataset**.
+
+## What we ask the PBWG
+
+1. Adopt the **analytic milestone dataset** as the common first layer of PBWG analyses.
+2. Agree the **milestone-table format** for partner contributions.
+3. **Complement the dataset** with your milestone lists.
+
+## A PBWG study dataset
+
+| Work thread | Uses the dataset for |
+|---|---|
+| TN-01 milestone dataset | linking all sources per flight |
+| TN-02 turnaround | delay one leg either side of a turn |
+| TN-03 TBO delivery | offsets at contract points |
+| VFE (exploratory) | level-offs near airports |
+
+::: {.notes}
+One dataset, several work threads. Each thread adds a payload and an algorithm on top of the same milestone table.
+:::
+
+## Outline
+
+1. The problem: one flight, many pieces
+2. Method: three layers, three linkage steps
+3. Examples: Europe–Brazil, Europe–China
+4. What the merged data show
+5. Between non-European regions
+6. Partner contributions: DECEA, CAAC/CAUC, AEROTHAI
+7. Data requirements and how to contribute
+
+# 1. The problem
+
+## Each source covers one part
+
+- **European airport data (APDF):** the European end.
+- **Partner data:** the partner end.
+- **OpenSky Network (OSN):** wherever its volunteer receivers see the aircraft.
+- Over the ocean: **nobody**.
+
+## OSN: a flight in pieces
+
+- OSN loses the aircraft over the ocean and starts a **new segment** when it sees it again.
+- Only the first segment has the departure airport, only the last the destination.
+- Linking needs the **aircraft identity (ICAO24) and time**, not the airport pair.
+
+# 2. Method
+
+## Three layers
+
+| Layer | Content |
+|---|---|
+| 1\. Analytic dataset | all milestones, all sources, linked per flight |
+| 2\. Payload | metric-specific cleaning and selection |
+| 3\. Algorithm | metric calculation (taxi, ASMA, VFE, ...) |
+
+## Keep everything
+
+- **No de-duplication, no overwriting, no source ranking.**
+- Every row stays traceable to its source (`SOURCE`, `SOURCE_ID`).
+- Which source is more trustworthy for a milestone is a **payload decision**.
+
+## Three linkage steps
+
+| Step | Rule |
+|---|---|
+| 1\. Reference records → flight | same ICAO24, ADEP, ADES; arrival within block-time window |
+| 2\. OSN segments → flight | same ICAO24; overlaps flight window |
+| 3\. Merge | all events of the linked segments |
+
+::: {.notes}
+Only mutually unique pairs are linked. One-sided flights keep their single reference record. MATCH records how each row was attached.
+:::
+
+# 3. Examples
+
+## TAM8085 London–São Paulo
+
+```{r}
+ex <- "EGLL-SBGR-E48BA9-202506072034"
+bra$ms |>
+  filter(UID == ex, !str_detect(MST, hide_mst)) |>
+  mutate(SOURCE = factor(SOURCE, c("OSN", "BRA", "EUR"), c("OSN", "Brazil", "Europe (APDF)")),
+         milestone = if_else(MST %in% core_mst, "PBWG milestone", "other OSN event")) |>
+  ggplot(aes(TIME, SOURCE)) +
+  geom_point(aes(shape = milestone), size = 3) +
+  scale_shape_manual(values = c("PBWG milestone" = 16, "other OSN event" = 1)) +
+  labs(x = "Time (UTC), 7–8 June 2025", y = NULL, shape = NULL) +
+  theme(legend.position = "bottom")
+```
+
+::: {.notes}
+APDF: SOBT, AOBT, ATOT, D40, D100 at EGLL. Brazil: A100, A40, ALDT, AIBT, SIBT at SBGR. OSN: runway times at both ends, rings at EGLL, A40 at SBGR, vertical profile, three segments. Where two sources report the same milestone: within 4 s (D40) to 53 s (ALDT).
+:::
+
+## Takeaway: complementary sources
+
+- Neither reference source alone covers **AOBT → AIBT**.
+- Merged, the flight is complete; OSN adds the airborne profile.
+- Where sources overlap, they agree **within reporting precision**.
+
+# 4. What the merged data show
+
+## Region pairs, 1–14 June 2025
+
+```{r}
+map2(list(bra, chn, zaf), c("Europe–Brazil", "Europe–China", "Europe–South Africa"), \(x, r)
+  x$flights |> summarise(`Region pair` = r, Flights = n(), `Both ends` = pc(mean(LINK == "dep+arr")),
+                         `With OSN` = pc(mean(N_OSN_SEGMENTS > 0)))) |>
+  list_rbind() |> tb()
+```
+
+::: {.notes}
+South Africa: no partner data yet – APDF + OSN baseline. Both ends = linked reference records at both ends.
+:::
+
+## Takeaway: partner data matter
+
+- OSN links to **practically all** flights – but near partner airports it sees little.
+- São Paulo: 40 NM ring for about a third of arrivals, **almost no runway times**.
+- China: very limited open coverage – **partner data are the primary source**.
+- Agreement OSN vs APDF runway times: median **below 30 s**.
+
+# 5. Between non-European regions
+
+## Reconstructed from OSN alone
+
+- Japan–USA, Singapore–Thailand, ...: no European record.
+- Flights are rebuilt by **chaining OSN segments per aircraft** in time.
+- Conservative: exclude rather than merge two flights.
+- Result: a **baseline** that both partners of a pair can complete.
+
+# 6. Partner contributions
+
+## Thank you, partners
+
+| Partner | Contribution |
+|---|---|
+| **DECEA** (Brazil) | Brazilian end of Europe–Brazil flights; block, runway, schedule, arrival 40/100 NM rings |
+| **CAAC, CAUC** (China) | Chinese end of Europe–China flights; block, runway, schedule times |
+| **AEROTHAI** (Thailand) | Thai domestic, Thailand–Singapore/Japan; block, runway, 40/100 NM rings |
+
+::: {.notes}
+All three in the PBWG milestone format. Brazil and China complete the partner end of flights to and from Europe; AEROTHAI is the first contribution between two non-European regions.
+:::
+
+## AEROTHAI milestones
+
+- About **`r format(round(n_distinct(tha$SOURCE_ID), -3), big.mark = ",")` flights**, June–September 2025.
+- Thai domestic, Thailand–Singapore, Thailand–Japan.
+- AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT – in the **PBWG format**.
+- First partner data between **two non-European regions**.
+
+## Linked to the OSN baseline
+
+- `r nrow(tha_lk$link)` of `r nrow(tha_lk$osn)` OSN flights Thailand–Singapore/Japan link to AEROTHAI (**`r pc(nrow(tha_lk$link) / nrow(tha_lk$osn))`**).
+- Link on aircraft identification, airports and time (no registration in the file).
+- Median time difference **below one minute**.
+
+## The Thai end, completed
+
+```{r}
+tha_osn_coverage(tha, tha_lk$link) |>
+  mutate(MST = factor(MST, c("AOBT", "ATOT", "D40", "D100", "A100", "A40", "ALDT", "AIBT"))) |>
+  pivot_longer(c(OSN, AEROTHAI), names_to = "Source") |>
+  ggplot(aes(MST, value, fill = Source)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = NULL, y = "share of flights", fill = NULL) +
+  theme(legend.position = "bottom")
+```
+
+::: {.notes}
+1–13 June 2025, linked flights. OSN sees the airborne milestones near Bangkok well but block times for only about a quarter to a third of the flights; AEROTHAI completes them. Runway times agree within about half a minute (OSN take-off ~30 s after the AEROTHAI ATOT – a definition difference, not a linkage error).
+:::
+
+## Takeaway: AEROTHAI
+
+- Open data see the air; **partner data see the ground**.
+- With AEROTHAI, the Thai end is complete for practically every flight.
+- Adding **scheduled times and registration** would open punctuality and turnaround analyses (TN-02).
+
+# 7. Data requirements
+
+## The milestone table
+
+| Field | Content |
+|---|---|
+| FLTID, REG, ICAO24, TYPE | flight and aircraft identity |
+| ADEP, ADES | airports |
+| MST, MST_LBL | milestone; runway / stand |
+| TIME, LAT, LON, ALT | value (UTC) |
+| SOURCE, SOURCE_ID | provider and record id |
+
+## Minimum to start
+
+- **Core milestones:** SOBT, AOBT, ATOT, ALDT, AIBT, SIBT at your airports.
+- **Identity:** REG or ICAO24 – makes linkage robust.
+- **Recommended:** D40/D100, A100/A40 ring crossings.
+- One row per milestone, **UTC**, as delivered – no ranking needed.
+
+## How members contribute
+
+1. Provide a sample month in the milestone format.
+2. PRU links it to European and OSN data and returns the merged dataset.
+3. Agree payload rules per metric together.
+
+::: {.notes}
+Every contribution improves the dataset for all members: the partner end of European flights and the flights between partner regions.
+:::
+
+## Proposal
+
+- Adopt the **analytic milestone dataset** as the PBWG common layer.
+- Agree the **milestone format** (incl. REG/ICAO24) for contributions.
+- Members **complement** the dataset with their milestone lists.
+- Next: Singapore data, payload rules, D200/A200 rings.
+
+## Thank you
+
+Questions and discussion

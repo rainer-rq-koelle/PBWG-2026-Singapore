@@ -1,0 +1,200 @@
+---
+title: "Turnaround and delay propagation"
+subtitle: "European study dataset, June–August 2025 (TN-02)"
+author: "EUROCONTROL Performance Review Unit"
+date: "PBWG, November 2026"
+format:
+  pptx:
+    reference-doc: assets/PBWG-tmpl.pptx
+    fig-width: 9
+    fig-height: 4.2
+    fig-dpi: 150
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(arrow)
+library(gt)
+library(here)
+source(here("R", "turnaround-metrics.R"))
+source(here("R", "turnaround-report.R"))
+theme_set(theme_gray(base_size = 16))
+period <- "20250601-20250831"
+hubs <- c("EGLL", "EHAM", "EDDF", "EDDM", "LFPG", "LSZH", "LTFM", "LIRF", "LEMD", "LPPT")
+hd_all <- map(hubs, \(h) ta_load(h, period, here("data", "turnaround"))) |> set_names(hubs)
+tm_all <- map(hd_all, "tm") |> list_rbind()
+ch_all <- map(hd_all, "ch") |> list_rbind()
+ratios <- map(hd_all, \(h) chain_links(h$ch)) |> list_rbind() |> filter(SRC %in% c("APDF", "hub"))
+rr <- \(link) { r <- ratios$DLY_RATIO[ratios$LINK == link]; sprintf("%.2f–%.2f", min(r), max(r)) }
+intl <- ch_all |> filter(PAIR_QC == "next-dep") |> summarise(x = mean(TA_CLASS != "EUR-EUR"), .by = HUB)
+tb <- function(x, n = 1) flextable::flextable(mutate(x, across(where(is.double), \(v) round(v, n)))) |>
+  flextable::fontsize(size = 12, part = "all") |> flextable::autofit()
+```
+
+## Why we are here
+
+- PBWG partners want to study **turnarounds** and how **delay propagates** from flight to flight.
+- TN-02 is the European contribution: **`r length(hubs)` hubs**, June–August 2025.
+- It uses the **same milestone table** as TN-01 – one PBWG study dataset.
+
+## What we ask the PBWG
+
+1. Agree the **turnaround measures** and their definitions.
+2. Discuss the **thresholds** (turn classes, minimum turnaround time).
+3. **Complete the international legs** with partner milestones.
+
+## Outline
+
+1. Concept: following the aircraft
+2. Measures
+3. European results
+4. Data requirements and partner contribution
+5. Proposal and next steps
+
+# 1. Concept
+
+## One leg either side of the turn
+
+| Point | Milestones | Delay |
+|---|---|---|
+| Upstream departure | SOBT, AOBT at origin | D0 |
+| Hub arrival | SIBT, AIBT | D1 |
+| Hub departure | SOBT, AOBT | D2 |
+| Downstream arrival | SIBT, AIBT at destination | D3 |
+
+::: {.notes}
+Arrival and departure are linked by the aircraft registration (same airframe). Delays are signed: > 0 late.
+:::
+
+## Turn classes
+
+- Classified on the **scheduled** ground time (STT = SOBT − SIBT).
+- **Turn:** ≤ 240 min (European legs), ≤ 360 min (international).
+- **Long turn** up to 420 min, then **parked**.
+- Durations only – no local-time or overnight criterion.
+
+# 2. Measures
+
+## Where delay is gained or lost
+
+- **Leg:** DDI-F = arrival delay − departure delay
+- **Turn:** DDI-G = ATT − STT = D2 − D1
+- **TDI** = D2 − max(0, D1) – early arrivals neutralised
+- **BTO / GTO:** share exceeding scheduled block / ground time
+- **D3 = D0 + DDI-F(up) + DDI-G + DDI-F(down)** – every minute is placed
+
+::: {.notes}
+Established indicators (CODA, De Wandeler 2011; ansperformance.eu acronyms). Sign: > 0 = delay added.
+:::
+
+## Delay ratio and margin
+
+- **Delay ratio** = mean delay out / mean delay in, per link.
+- **MTT** = empirical minimum turnaround time (5th percentile of ATT per class and type).
+- **Available margin** = SOBT − AIBT − MTT.
+- **Punctuality:** ICAO GANP window, ±15 min.
+
+# 3. European results
+
+## Rotation accounting
+
+```{r}
+plot_waterfall(ta_waterfall(ch_all))
+```
+
+::: {.notes}
+EUR–EUR turns with both remote ends. Mean delay at the upstream departure (D0), change on the upstream leg, hub turn and downstream leg, mean delay at the downstream arrival (D3).
+:::
+
+## Takeaway: legs recover, turns add
+
+- Delay ratio: upstream leg **`r rr("1 upstream leg (D0->D1)")`**, hub turn **`r rr("2 hub turn (D1->D2)")`**, downstream leg **`r rr("3 downstream leg (D2->D3)")`**.
+- Full chain: **`r rr("chain (D0->D3)")`** – hubs differ.
+- Schedule buffers recover a roughly constant number of minutes, not a share.
+
+## Margin after arrival
+
+```{r}
+plot_margin(ch_all)
+```
+
+::: {.notes}
+Share of departures 15 min or more late by available margin after arrival. Once the margin is used up, three quarters or more are late at every hub. With ample margin, the curves level off at hub-specific values: late departure not explained by a late inbound aircraft.
+:::
+
+## Takeaway: margin
+
+- No margin left → **most departures late** at every hub.
+- Ample margin → hubs differ (about 10–15% to over 40%).
+- This plateau **separates hubs** better than averages.
+
+## Punctuality windows
+
+```{r}
+plot_punct(ch_all)
+```
+
+::: {.notes}
+GANP ±15 min. Departures 15 min or more early are practically absent. Early arrivals: 6–25% of turns, most at LTFM, EGLL and LEMD.
+:::
+
+## Drivers (exploratory)
+
+- **ATFM delay** explains part of the departure delay – not all.
+- **Early in-block** raises DDI-G, but departures are less delayed.
+- **Stand blocked at landing:** frequent at some hubs, little effect on departure delay.
+- **Long taxi-out** (> 40 min): rare; for discussion.
+
+# 4. Data requirements
+
+## The remote end is the gap
+
+```{r}
+intl |> mutate(HUB = factor(HUB, hubs)) |>
+  ggplot(aes(x, HUB)) + geom_col() +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = "share of turns with an international leg (blank remote end)", y = NULL)
+```
+
+::: {.notes}
+European remote ends: airport data, or a flight-plan proxy (EUROCONTROL-specific). International remote ends are left blank – partner data can complete them.
+:::
+
+## What a turnaround needs
+
+| Field | Purpose |
+|---|---|
+| REG or ICAO24 | link arrival and next departure |
+| SOBT, SIBT | schedule: delays, punctuality |
+| AOBT, AIBT | actual ground time |
+| ATOT, ALDT | taxi times, leg times |
+
+## AEROTHAI: next step
+
+- AEROTHAI data (TN-01): actual times, Thai domestic and international.
+- Turnarounds at Bangkok need **registration** and **scheduled times**.
+- The PBWG format already has the fields – **a future release can add them**.
+
+## How members contribute
+
+1. Milestone lists of your airports, with **REG** and **SOBT/SIBT**.
+2. PRU links them to the European hubs – completing international legs.
+3. Turnarounds at **your** hubs with the same method.
+
+# 5. Proposal
+
+## Proposal and next steps
+
+- Agree the measures: STT/ATT, D0–D3, DDI-F/DDI-G/TDI, BTO/GTO, GANP punctuality.
+- Discuss thresholds and MTT.
+- Members complete international legs and add their hubs.
+- Next: summer 2026, more hubs, delay causes.
+
+## Thank you
+
+Questions and discussion

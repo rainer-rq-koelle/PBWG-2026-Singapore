@@ -28,6 +28,11 @@ format:
     fig-height: 4
     fig-pos: "H"
     echo: false
+    include-in-header:
+      text: |
+        \usepackage{float}
+        \floatplacement{table}{H}
+pdf-engine: lualatex
 execute:
   warning: false
   message: false
@@ -70,6 +75,25 @@ rr <- \(link) {
   sprintf("%.2f–%.2f", min(r), max(r))
 }
 ```
+
+## Key Messages
+
+- **A turnaround links two flights of the same aircraft.** With the milestones of the inbound and outbound flight at the hub and at the remote airports, delay can be followed one leg either side of the turn (D0 → D1 → D2 → D3).
+- **Flight legs recover delay; the hub turn adds it.** Across `r length(hubs)` European hubs, June–August 2025, the delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound leg, `r rr("2 hub turn (D1->D2)")` across the hub turn and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Over the full chain it is `r rr("chain (D0->D3)")`.
+- **Established indicators can be reproduced from milestones** (BTO, DDI-F, GTO, DDI-G, TDI), together with punctuality in the ICAO GANP ±15 min window. They need only scheduled and actual block times and the aircraft registration.
+- **Remote ends are the limiting factor.** Where the remote airport does not report, the leg is completed with a flight-plan proxy (Europe) or left blank (international). Turns with an international leg are 12–54% of turns depending on the hub (EGLL 40%, LTFM 54%); **PBWG partner data can complete them**.
+- **The same milestone table as TN-01** is used, so the PBWG study dataset serves both work threads.
+
+| Measure | Definition | Where shown |
+|---|---|---|
+| STT / ATT | Scheduled / actual turnaround time (SOBT − SIBT / AOBT − AIBT) | §3.4–3.5, chapter 4 |
+| D0–D3 | Delay at upstream departure, hub arrival, hub departure, downstream arrival | §3.5, §5.3 |
+| MTT, available margin | Empirical minimum turnaround time; SOBT − AIBT − MTT | §3.5, §5.2 |
+| BTO / GTO | Share of flights / turns exceeding scheduled block / ground time | §5.3 |
+| DDI-F / DDI-G / TDI | Delay difference across leg / turn; turn delay with early arrivals neutralised | §5.3 |
+| Delay ratio, late carry | Mean delay out / in per link; share of late inbound that stays late | §5.3 |
+| Punctuality (GANP) | Share within ±15 min of schedule | §5.5 |
+| Local drivers | Early in-block, stand blocked, long taxi-out, ATFM delay | §5.4, §5.6 |
 
 ## 1. Introduction
 
@@ -556,7 +580,7 @@ These results describe one summer and should be read with the coverage of chapte
 - **Flight legs reduce delay.** Mean DDI-F is negative on both legs at every hub, and BTO is mostly around 15–30%, at or below CODA's 30–35% planning range. The delay ratio is `r rr("1 upstream leg (D0->D1)")` on the inbound and `r rr("3 downstream leg (D2->D3)")` on the outbound leg. Schedule buffers recover a roughly constant number of minutes rather than a share of the delay, so a late flight stays late.
 - **The hub turn adds delay.** GTO is about 70–80%: most turns take longer than scheduled, and mean DDI-G is positive at every hub (delay ratio `r rr("2 hub turn (D1->D2)")`). TDI, which neutralises early arrivals, is lower but positive at most hubs. Early or on-time arrivals still depart with a positive median delay, while slack in the turn absorbs part of large inbound delays.
 - **ATFM delay accounts for part of the departure delay but not all of it.** Turns whose outbound flight carried ATFM delay depart markedly later, while turns without any ATFM delay still show positive mean departure delay and TDI at most hubs.
-- **Punctuality windows.** Within the GANP ±15 min window, departures are punctual for roughly half to two thirds of turns at most hubs; almost no departure is 15 min or more early. Arrivals are early (15 min or more before SIBT) for 7–25% of turns, most at LTFM, EGLL and LEMD, consistent with the AIU early arrivals analysis.
+- **Punctuality windows.** Within the GANP ±15 min window, departures are punctual for roughly half to two thirds of turns at most hubs; almost no departure is 15 min or more early. Arrivals are early (15 min or more before SIBT) for 6–25% of turns, most at LTFM, EGLL and LEMD, consistent with the AIU early arrivals analysis.
 - **Local drivers.** Early in-blocks raise DDI-G by construction (longer actual ground time) but come with lower departure delay. Stand blocked at landing is frequent at some hubs (EDDF, EGLL, EDDM) but shows little difference in departure delay or TDI, i.e. it does not appear as a driver of departure delay in this data. Long taxi-out is rare (mostly < 1% of turns; EGLL 2%, LIRF 5%); at most hubs these turns also depart later, whereas at LIRF they depart earlier than other turns, which could indicate that aircraft leave the stand on time and wait on the taxiway. This is a hypothesis for discussion, not a finding.
 - **Over the full chain** the hubs differ (`r rr("chain (D0->D3)")`): at some hubs the leg buffers outweigh the delay added at the hub, at others the hub adds more than the legs recover. Whether these differences are systematic needs more than one season.
 - **Daily view.** Per-hub timelines (chapter 4) show that period values hide considerable day-to-day variation; a few days with high departure delay and ATFM delay stand out at several hubs. Their operational interpretation is left for discussion.
@@ -620,7 +644,9 @@ These results describe one summer and should be read with the coverage of chapte
 
 `TA-<HUB>-flight-attributes-<period>.parquet`: APDF flight type and delay codes (`DLY1–5`, `DLY_TIME1–5`), NM ATFM fields (`ATFM_DELAY`, `MOST_PEN_REG`, `REG_REASON`, `IATA_DELAY_CODE`), NM Model 1/3 durations. Carried for later use.
 
-## Appendix B: Workflow and Files
+## Appendix B: Workflow and Files (EUROCONTROL-specific Processing)
+
+This appendix and the NM-based proxies (§3.2–3.3) apply only to the EUROCONTROL internal processing. The data environments of other PBWG members differ and will face other issues.
 
 | Step | Code | Output (`data/turnaround/`) |
 |---|---|---|
@@ -695,3 +721,34 @@ The study uses the prefixes `E` and `L` as a whole; the few non-member locations
 - Published definitions of DDI-G, GTO and TDI beyond the Aviation Intelligence Portal (original CODA/PRU source).
 - Expansion to further hubs and to summer 2026 (NM Q3 2026 final).
 - International legs can be completed with partner data (remote SOBT/AOBT/ATOT, ALDT/AIBT/SIBT) in the milestone format of Appendix A.1.
+
+## Appendix E: Partner Data – Future Extension
+
+AEROTHAI contributed milestones for Thai domestic flights and flights between Thailand and Singapore and Japan (June–September 2025; see TN-01, section 7.5). The file provides actual times (AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT) and the aircraft identification. A turnaround analysis at Bangkok (VTBS, VTBD) additionally needs:
+
+| Field | Purpose |
+|---|---|
+| `REG` or `ICAO24` | Link the arrival and the next departure of the same aircraft (turnaround) |
+| `SOBT`, `SIBT` | Scheduled ground time, delays D1/D2, punctuality |
+
+The PBWG milestone format already provides these fields, so they can be added with a future release. The same applies to every PBWG member: with registration and scheduled times at their airports, the international legs of the European hubs (blank in this note) and turnarounds at partner hubs can be analysed with the method of this note.
+
+## Appendix F: Abbreviations
+
+| Abbreviation | Meaning |
+|---|---|
+| AOBT / AIBT | Actual off-block / in-block time |
+| APDF | Airport operator data flow (European airport data) |
+| ATFM | Air traffic flow management |
+| ATOT / ALDT | Actual take-off / landing time |
+| ATT / STT | Actual / scheduled turnaround time |
+| BTO / GTO | Block-time overshoot / ground-time overshoot |
+| D0–D3 | Delay at upstream departure, hub arrival, hub departure, downstream arrival |
+| DDI-F / DDI-G | Delay difference indicator, flight / ground |
+| GANP | ICAO Global Air Navigation Plan |
+| ICAO24 | ICAO 24-bit aircraft address |
+| MTT | Minimum turnaround time (empirical) |
+| NM | EUROCONTROL Network Manager |
+| SAM_ID | Network Manager flight identifier (EUROCONTROL-specific) |
+| SOBT / SIBT | Scheduled off-block / in-block time |
+| TDI | Turnaround delay indicator |
