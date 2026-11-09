@@ -304,6 +304,7 @@ plot_profile_flight <- function(pf) {
     geom_hline(yintercept = 0, colour = "grey50") +
     geom_line() +
     facet_wrap(~name, ncol = 1, scales = "free_y") +
+    scale_y_continuous(n.breaks = 3) +
     labs(x = "distance along the reference (NM)", y = NULL, colour = NULL) +
     theme(legend.position = "bottom")
 }

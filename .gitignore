@@ -47,3 +47,6 @@ data/intl/
 
 # TN-03 local data (flight-level, never commit)
 data/tbo/
+
+# rendered slide decks
+TN-*-slides.pptx

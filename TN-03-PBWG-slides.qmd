@@ -1,0 +1,558 @@
+---
+title: "Measuring TBO delivery"
+subtitle: "From planned and flown trajectories to contract points – a proposal for the PBWG"
+author: "EUROCONTROL Performance Review Unit"
+date: "PBWG, November 2026"
+format:
+  pptx:
+    reference-doc: assets/PBWG-tmpl.pptx
+    fig-width: 10
+    fig-height: 5
+    fig-dpi: 150
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(gt)
+library(here)
+source(here("R", "tbo-conformance.R"))
+source(here("R", "tbo-synthetic.R"))
+source(here("R", "tbo-synthetic-plots.R"))
+source(here("R", "tbo-report.R"))
+source(here("R", "tbo-slides.R"))
+res <- run_cases(); mst <- mst_cases()
+theme_set(theme_gray(base_size = 16))
+d <- tbo_load(); cf <- conf_load(); th <- tha_load()
+pf_aea <- arrow::read_parquet(tbo_dir("TBO-dev-profile-AEA36MB.parquet"))
+tb <- function(x, n = 1) flextable::flextable(mutate(x, across(where(is.double), \(v) round(v, n)))) |> flextable::fontsize(size = 12, part = "all") |> flextable::autofit()
+```
+
+## Why we are here
+
+- All PBWG members asked for a way to measure **TBO performance**.
+- No established measure exists: ICAO GANP indicators measure punctuality and efficiency, not whether
+  an agreed trajectory was delivered.
+- This is new territory. TN-03 proposes and tests an approach on synthetic, European and partner data.
+
+## What we ask the PBWG to agree
+
+1. the **principle**: measure delivery against a declared reference trajectory;
+2. a **core set of contract points** and offsets;
+3. the **data requirements**: which points each partner provides, in a common format.
+
+## Outline
+
+1. The concept: what does "TBO delivery" mean?
+2. The method: offsets at contract points and along the route
+3. What the measures signify – synthetic cases
+4. European examples: filed vs regulated plan, reroutes
+5. International connections: the observation gap
+6. Partner contribution: AEROTHAI
+7. **Data requirements: which points, which fields**
+8. Proposal and next steps
+
+# 1. The concept
+
+## Contract delivery, not deviation
+
+- Under TBO, each flight is managed against a trajectory **shared and agreed** by airspace user, ANSPs
+  and airports.
+- The performance question becomes: **was the agreed trajectory delivered?**
+- We call this **contract delivery**, not deviation:
+  - a flight can adhere closely to an inefficient agreement;
+  - a deviation (e.g. an authorised direct) can improve the outcome.
+- Therefore: offsets keep their **sign**; adherence and efficiency are **reported separately**.
+
+## Four questions about TBO
+
+| Object | Question | Today |
+|---|---|---|
+| **Agreement delivery** | Did the flight do what was agreed? | **measurable** with plans and tracks |
+| Predictability | How well could the passage be known in advance? | needs archived predictions |
+| Stability | How much and how late did the agreement change? | **partly**: filed vs revised plan |
+| Consequence | What did the differences cost or save? | needs fuel / cost references |
+
+::: {.notes}
+TN-03 concentrates on **delivery**, with a first view of **stability**.
+:::
+
+## Which trajectory is "the contract"?
+
+- "Planned" covers different objects: preferred, **filed**, **revised** (e.g. after flow management),
+  agreed, predicted.
+- None of today's data carries a formal TBO agreement with tolerances.
+- Proposal: use the best available plan as a **declared reference** and label every result with it.
+  - Europe: filed plan (M1) and regulated plan (M2)
+  - Partners: filed plan, slot-adjusted plan, schedule – whatever is recorded
+- **The reference must always be stated.** Different references answer different questions.
+
+## Lining up plan and flight
+
+| Alignment | Question | Result |
+|---|---|---|
+| **Same event** | When / where did the flight reach a defined point? | offsets at **contract points** |
+| Same progress along the route | When did the flight pass this point of the plan? | time offset Δt(s), lateral d(s), level ΔFL(s) |
+| Same clock time | Where is the flight relative to where it should be now? | distance offset Δs(t) |
+
+::: {.notes}
+- The **event view** works with point data – it is the basis for global monitoring.
+- The continuous views explain what happened **between** points where dense tracks exist.
+- Shape-matching (e.g. dynamic time warping) is **not** used: it removes the timing offset we want to see.
+:::
+
+## The event view is the global basis
+
+- **Same event** (contract points) works with **point data** – the basis for global monitoring.
+- Same progress / same time need dense tracks – they **explain** what happened between points.
+- Shape matching (e.g. dynamic time warping) is **not** used: it removes the timing offset we want to see.
+
+# 2. The method
+
+## Contract points
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_concept_points()
+```
+
+::: {.notes}
+Each contract point is computed **independently** on the plan and on the flight, then joined by name.
+:::
+
+## Offsets at a contract point
+
+For contract point *k*, planned value (reference) vs observed value (actual):
+
+- **Time** Δt~k~ = t~actual~ − t~plan~ (+ = late)
+- **Position** Δpos~k~ = distance between crossings (NM)
+- **Level** ΔFL~k~ = FL~actual~ − FL~plan~ (+ = above)
+- **Segment change** ΔΔt~k~ = Δt~k~ − Δt~k−1~
+
+**Arrival offset = departure offset + Σ segment changes** – every minute is placed.
+
+## Status of each contract point
+
+| Status | Meaning |
+|---|---|
+| delivered | on both plan and flight, observed |
+| planned-only | in the plan, not flown (e.g. FIR not entered) |
+| actual-only | flown, not planned (e.g. extra FIR after a direct) |
+| not observed | no real observation – value only extrapolated |
+
+::: {.notes}
+A **missing** or **extra** point is itself a result – e.g. a changed FIR sequence.
+:::
+
+## Revision and execution
+
+When two plan versions exist (filed M1, revised M2), the time offset at any contract point splits **exactly**:
+
+**t~flown~ − t~filed~  =  (t~revised~ − t~filed~)  +  (t~flown~ − t~revised~)**
+
+total = **revision** (what the network changed) + **execution** (what the flight did)
+
+- Unregulated flights: revision = 0.
+- Lateral and level offsets do not add up this way – they are reported against each reference.
+
+## Tolerance windows
+
+Under TBO an agreement carries tolerances. For a window [L, U] at a contract point:
+
+- **compliance**: L ≤ t~actual~ ≤ U
+- **early exceedance** = max(L − t~actual~, 0)  ·  **late exceedance** = max(t~actual~ − U, 0)
+
+Early and late are reported **separately** – they have different consequences.
+
+No agreed TBO windows are recorded yet → demonstrated with the **ATFM slot window** as a labelled proxy.
+
+## Between the points
+
+Where dense tracks exist, the method also computes along the route:
+
+- **Drift**: change of time offset across the en-route phase (inherited vs en-route delay)
+- **Signed cross-track distance**; off-route spans with extra distance
+- **Distance difference**: departure / en route / arrival
+- **Level offset**; TOC/TOD offsets
+- **Coverage**: share of the route actually observed
+
+These **explain**; the contract points **compare**.
+
+# 3. What the measures signify
+
+## Same position or same time?
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_space_time(res)
+```
+
+::: {.notes}
+10 minutes late at the same position = 70 NM behind at the same clock time. **Same fact, two views.**
+The time view is primary: it does not depend on speed.
+:::
+
+## Inherited vs en-route delay
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_milestone_chain(mst)
+```
+
+::: {.notes}
+Synthetic flight: 8 min late at departure, recovers 1.8 min en route, loses 2.4 min in descent –
+**every minute is accounted for at a named point**.
+:::
+
+## A changed FIR sequence
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_fir_detour(mst)
+```
+
+::: {.notes}
+A detour enters FIR D: two crossings exist **only on the actual flight**. The FIR sequence is the
+cheapest signature of lateral delivery and works with coarse data.
+:::
+
+## What a vertical share says
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_vertical(res)
+```
+
+::: {.notes}
+- "Within or above" counts climbing above the plan as good → **efficiency, not adherence**.
+- If the plan is already capped, flying it perfectly hides the lost level.
+- → report **signed level offset**, a **symmetric share with a stated band**, and **distance below
+  requested level** separately.
+:::
+
+# 4. European examples
+
+## European sample
+
+```{r}
+tab_sample(d) |> rename(`Airport pair` = PAIR) |> tb()
+```
+
+::: {.notes}
+1–14 June 2025 · three plan versions per flight: filed (M1), regulated (M2), flown (M3)
+:::
+
+::: {.notes}
+1–14 June 2025. Europe has three trajectory versions per flight: **filed (M1), regulated (M2), flown (M3)**
+→ ideal test bed for the choice of reference.
+:::
+
+## The reference changes the answer
+
+```{r}
+tab_pair_refs(d) |> select(PAIR, MST, med_M1, med_M2) |>
+  pivot_wider(names_from = MST, values_from = c(med_M1, med_M2)) |>
+  select(Pair = PAIR, `D40 vs filed` = med_M1_D40, `D40 vs regulated` = med_M2_D40,
+         `A40 vs filed` = med_M1_A40, `A40 vs regulated` = med_M2_A40) |> tb()
+```
+
+::: {.notes}
+Median time offset (min), regulated flights: **late vs filed, ~on time vs regulated**
+:::
+
+::: {.notes}
+Median time offset (min), regulated flights. **~4–11 min late vs the filed plan, within ~3 min vs the
+regulated plan.** Both are true – they answer different questions.
+:::
+
+## What the reference does
+
+- Regulated flights: **4–11 min late** against the filed plan.
+- The same flights: **within ~3 min** of the regulated plan; spread halved.
+- Both are true: the first measures the **original commitment**, the second the **trajectory in force at departure**.
+- → **The reference must always be declared.**
+
+## Revision and execution
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_rev_exec(d)
+```
+
+::: {.notes}
+Almost all of the offset against the filed plan is **revision** (~11 min). Against the regulated plan,
+flights are **~1–2 min early** – they recover in the air.
+:::
+
+## DLH1304 EDDF–LTFM
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_chain(d, 285787181)
+```
+
+::: {.notes}
+32 min ATFM delay. **27 min late vs filed**, **6–8 min early vs regulated**: the flight over-delivered
+on the trajectory it was given.
+:::
+
+## Reroutes
+
+- 64,000 regulated flights at 10 study airports scanned: **~3%** have a changed route description.
+- Only about half differ by **> 5 NM en route** – the rest are SID/STAR changes.
+- **Proposed definition:** reroute = revised plan > 5 NM from filed plan en route.
+
+## Reroutes: which reference?
+
+```{r}
+tab_reroute_delivery(d) |> select(GROUP, REF, `Cross-track mean (NM)`, `Cross-track P95 (NM)`, `Time offset (min)`) |>
+  rename(Group = GROUP, Reference = REF) |> tb()
+```
+
+::: {.notes}
+For real reroutes the regulated plan is also the better **lateral** reference
+:::
+
+::: {.notes}
+For real reroutes the regulated plan is also the better **lateral** reference (P95 15 → 12 NM).
+:::
+
+## Reroutes on the map
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+lab <- d$rr_keys |> mutate(L = paste(AIRCRAFT_ID, paste(ADEP, ADES, sep = "–"))) |> select(ID, L)
+plot_map3(d$rr_prof, c(285745366, 286241176, 285903572), labeller = as_labeller(setNames(lab$L, lab$ID)))
+```
+
+::: {.notes}
+The flown track often follows **neither** plan: tactical directs. → report the lateral offset **signed**,
+with the distance difference.
+:::
+
+## Lessons from the reroutes
+
+- A changed route description is **not** a reroute: half are SID/STAR changes only.
+- For real reroutes, the regulated plan is also the better **lateral** reference (P95 15 → 12 NM).
+- The flown track often follows **neither** plan: tactical directs.
+- → report the lateral offset **signed**, with the distance difference – a shortcut is not non-compliance.
+
+## Along the route: AEA36MB
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_profile_flight(pf_aea)
+```
+
+::: {.notes}
+Lateral and vertical offsets identical for both references; the time offset shifts by the regulation but
+the **drift (−2.5 min)** is the same.
+:::
+
+## FIR entries as contract points
+
+```{r}
+tab_fir_refs(d) |> tb()
+```
+
+::: {.notes}
+Median offset **7.7 → 0.5 min** with the regulated plan as reference
+:::
+
+::: {.notes}
+FIR entries behave like the range rings: **8 min → 0.5 min** median offset when the regulated plan is
+the reference. FIR entries can carry the revision–execution split.
+:::
+
+## Slot window as proxy
+
+```{r}
+tab_slot_window(cf) |> select(PAIR, `Within window (%)`, `Early (%)`, `Late (%)`, `Mean late exceedance (min)`) |>
+  rename(Pair = PAIR) |> tb()
+```
+
+::: {.notes}
+Outside the window: **mostly slightly early**; few late, but by several minutes
+:::
+
+::: {.notes}
+83–97 % within −5/+10 min. Outside: **mostly slightly early**; the few late ones exceed by several
+minutes – a compliance share alone would hide this.
+:::
+
+# 5. International connections
+
+## Plan global, observation regional
+
+- The filed plan covers the **whole** flight → contract points exist at both ends.
+- The European flown trajectory **extrapolates** the plan outside Europe: 92–97 % of ring crossings at the
+  partner airport (flights leaving Europe) are identical to the plan.
+- A naive analysis would report **perfect delivery** at the partner airport.
+- → every observed value carries an **observation status**; extrapolated = **not observed**.
+
+## Who observes the partner end?
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_intl_coverage(d)
+```
+
+::: {.notes}
+Open data (OpenSky) and European surveillance cover most airports – but **São Paulo and Beijing arrivals,
+Bangkok departures** remain largely unobserved. **This is where partner data matter most.**
+:::
+
+## Where partner data matter most
+
+- Open data (OpenSky) and European surveillance cover **Toronto, Atlanta, Singapore, Tokyo** well.
+- **São Paulo and Beijing arrivals** and **Bangkok departures** to Europe remain largely **unobserved**.
+- Without observations at the partner end, the arrival offset only **repeats the departure offset**.
+- → partner milestones close a **measurable** gap.
+
+## Example: THA911 London–Bangkok
+
+- Departs London **32 min** behind the filed plan.
+- European record: arrival in Bangkok **extrapolated** with the same offset.
+- OpenSky ring crossings at Bangkok: **31 / 33 min** at 100 / 40 NM – **observed**.
+- The delay was carried through the flight – the observation confirms it rather than assuming it.
+
+# 6. Partner contribution: AEROTHAI
+
+## AEROTHAI milestones
+
+```{r}
+tab_tha_overview(th) |> select(FLOW, Flights, `Aerodrome pairs`) |> rename(Flow = FLOW) |> tb(0)
+```
+
+::: {.notes}
+June–September 2025 · PBWG milestone format · used without conversion
+:::
+
+## Thank you, AEROTHAI
+
+- About **35,000 flights**, June–September 2025, in the **PBWG milestone format**.
+- Off-block, take-off, 40/100 NM rings, landing, in-block – used **without conversion**.
+- Ring crossings lie on 40 / 100 NM to within **0.5 NM**.
+- First partner data at the **partner end** of the flight.
+
+## The Thai end of the flight
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4.2
+plot_tha_arrival(th)
+```
+
+::: {.notes}
+100→40 NM: stable ~9–10 min. 40 NM→landing: **19.5 min from Singapore vs 15 min from Japan**; Don Mueang
+tighter than Suvarnabhumi → where arrival management absorbs time.
+:::
+
+# 7. Data requirements
+
+## Points, not trajectories
+
+- Partners will deliver **points**, not full trajectories.
+- The contract-point view needs, per flight and point: **one planned value and one observed value**.
+- The continuous measures are a European / research add-on – **not required** from partners.
+
+## Two records per contract point
+
+| | Reference (plan) | Actual (observation) |
+|---|---|---|
+| Time | planned time over the point | observed time over the point |
+| Position | planned crossing (rings / FIR: implied) | observed crossing lat/lon |
+| Level | planned FL | observed FL / altitude |
+| Label | reference type (filed, revised, schedule) | source + observation status |
+
+## Required contract points
+
+| Tier | Points | Why |
+|---|---|---|
+| **Core** | AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT | departure/arrival delivery; already in PBWG milestone format |
+| **Core** | Planned times for the same points (SOBT/SIBT, filed EOBT, planned ring times) | without a reference there is no offset |
+| Extended | FIR entry/exit (ID, time, FL) | lateral delivery, FIR sequence, international boundaries |
+| Extended | D200 / A200, TOC / TOD | cruise and vertical delivery |
+| Extended | Revised plan times (after ATFM / slot) | revision vs execution |
+| Optional | Tolerance window per point (e.g. slot window) | compliance and exceedance |
+
+## Record format
+
+| Field | Content |
+|---|---|
+| FLTID, ADEP, ADES, ICAO24, TYPE | flight identity |
+| MST | contract point (D40, A100, FIR:XXXX>YYYY, TOC, …) |
+| **TIME**, LAT, LON, ALT | observed value |
+| **REF_TIME**, REF_LAT, REF_LON, REF_FL | **planned value (new)** |
+| **REF_TYPE** | filed / revised / schedule (**new**) |
+| SOURCE, OBS | provider; observed / proxy / extrapolated (**new**) |
+
+::: {.notes}
+AEROTHAI already provides the observed values – **only the planned values are missing**.
+:::
+
+## Minimum to get started
+
+- **Step 1** – what partners already provide: observed core milestones (as AEROTHAI did).
+  → enables observation coverage and segment durations.
+- **Step 2** – add **planned times** for the same points (schedule, filed plan).
+  → enables **time offsets**: the first true TBO-delivery measure.
+- **Step 3** – add **FIR crossings** and revised plan times.
+  → lateral delivery and revision/execution.
+
+Europe can supply the planned and observed values for the European end of every connection.
+
+# 8. Proposal and next steps
+
+## What changes for a partner
+
+| | |
+|---|---|
+| **No change** | Observed milestones in the PBWG format (as for TN-01 / TN-02) |
+| **New** | Planned time for the same points (schedule or filed plan) + reference type |
+| **Optional** | FIR crossings; revised plan times; tolerance windows |
+| **Not needed** | Full trajectories, surveillance tracks, internal system access |
+| **Europe provides** | Planned and observed values at the European end of each connection |
+
+## What we propose the PBWG agrees
+
+1. **Principle**: TBO delivery = signed offsets of the actual flight against a **declared reference**;
+   time, lateral, vertical reported separately; observation status always shown.
+2. **Core contract points**: AOBT, ATOT, D40, D100, A100, A40, ALDT, AIBT – with **planned and observed** times.
+3. **Common record format**: PBWG milestone table + reference fields + observation status.
+4. **Core measures**: time offset per point, segment change, FIR-sequence match, compliance with a stated window.
+5. **Pilot**: partners provide Step 1–2 data for **one month** on the study city pairs.
+
+## Next steps
+
+- Agree a **measurement specification**: reference cut-off time, ring radii, tolerances, aggregation rules.
+- Partners: pilot data in the common format (one month, study airports).
+- Europe: extend to a season; provide the European end for all pilot connections.
+- Later: **predictability** and **revision history** once archived predictions / agreement versions exist.
+
+## Decision requested
+
+1. **Endorse the principle**: TBO delivery measured as signed offsets against a declared reference.
+2. **Adopt the core contract points** (AOBT … AIBT) with planned and observed times.
+3. **Extend the PBWG milestone table** with reference fields and observation status.
+4. **Launch a one-month pilot** on the study city pairs; results at the next PBWG meeting.
+
+## Thank you
+
+TN-03 and the companion data-processing report are available in the PBWG project repository.
+
+Questions and discussion.
